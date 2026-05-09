@@ -3,7 +3,11 @@ import pandas as pd
 import numpy as np
 import io
 import re
+import json
+import requests
+import zipfile
 from datetime import datetime
+from pathlib import Path
 
 # Optional imports. The app will still run if these are missing,
 # but OCR/PDF export features need them installed.
@@ -32,136 +36,510 @@ except Exception:
 
 
 # ==========================================
-# ALENZA CAPITAL | CRE UNDERWRITING SUITE
-# Single-File Institutional Build
-# Includes OCR Intake, Excel Export, PDF Export
+# ALENZA CAPITAL | CANADA CRE UNDERWRITING SUITE
+# Full Canada-Sovereign Stack
+# Includes: NRCan Address Intelligence, Bank of Canada Rates,
+# Corporations Canada Lookup, Rent Roll Engine, Diligence Room,
+# Portfolio Database, Amortization Tab, Backup ZIP
 # ==========================================
 
 st.set_page_config(
-    page_title="Alenza Capital Underwriting Suite",
+    page_title="Alenza Capital Canada - CRE Underwriting Suite",
     page_icon="🏛️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
+# ==========================================
+# INITIALIZE SESSION STATE
+# ==========================================
+if "auto_purchase_price" not in st.session_state:
+    st.session_state.auto_purchase_price = None
+if "auto_appraisal" not in st.session_state:
+    st.session_state.auto_appraisal = None
+if "auto_noi" not in st.session_state:
+    st.session_state.auto_noi = None
+if "portfolio" not in st.session_state:
+    st.session_state.portfolio = []
+if "diligence_docs" not in st.session_state:
+    st.session_state.diligence_docs = []
+if "rent_roll_data" not in st.session_state:
+    st.session_state.rent_roll_data = None
+
 
 # ==========================================
-# ARGUS-STYLE INSTITUTIONAL UI
+# WHITE/GREY/GOLD THEME (READABLE)
 # ==========================================
 
 st.markdown("""
     <style>
-    :root {
-        --bg-main: #05080F;
-        --bg-panel: #0F172A;
-        --bg-panel-alt: #111827;
-        --border: #1E293B;
-        --text-main: #F3F4F6;
-        --text-muted: #9CA3AF;
-        --accent: #1D4ED8;
-        --accent-soft: #2563EB;
-        --success: #16A34A;
-        --warning: #D97706;
-        --danger: #DC2626;
+    /* ==========================================
+       WHITE/GREY/GOLD/BLACK PROFESSIONAL THEME
+       High contrast, readable, institutional look
+    ========================================== */
+    
+    /* Main app - WHITE background */
+    .stApp {
+        background-color: #FFFFFF !important;
     }
-
+    
     .main {
-        background-color: var(--bg-main);
-        color: var(--text-main);
-        font-family: "Helvetica Neue", Arial, sans-serif;
+        background-color: #FFFFFF !important;
+        color: #1A1A1A !important;
     }
-
+    
+    /* Sidebar - DARK GREY background, white text */
     section[data-testid="stSidebar"] {
-        background-color: var(--bg-panel) !important;
-        border-right: 1px solid var(--border);
+        background-color: #2D2D2D !important;
+        border-right: 1px solid #4A4A4A !important;
     }
-
-    h1, h2, h3 {
-        letter-spacing: -0.02em;
+    
+    section[data-testid="stSidebar"] .stMarkdown,
+    section[data-testid="stSidebar"] .stCaption,
+    section[data-testid="stSidebar"] label,
+    section[data-testid="stSidebar"] .stTitle,
+    section[data-testid="stSidebar"] .stSubheader {
+        color: #EAEAEA !important;
     }
-
-    [data-testid="stMetricValue"] {
-        font-size: 27px !important;
-        font-weight: 800 !important;
-        color: var(--accent-soft) !important;
+    
+    section[data-testid="stSidebar"] h1,
+    section[data-testid="stSidebar"] h2,
+    section[data-testid="stSidebar"] h3 {
+        color: #D4AF37 !important;
     }
-
-    [data-testid="stMetricLabel"] {
-        font-size: 12px !important;
-        text-transform: uppercase;
-        letter-spacing: 1.4px;
-        color: var(--text-muted) !important;
+    
+    /* Headers - BLACK with GOLD accent */
+    h1 {
+        color: #1A1A1A !important;
+        font-weight: 700 !important;
+        border-bottom: 3px solid #D4AF37 !important;
+        padding-bottom: 12px !important;
     }
-
+    
+    h2, h3 {
+        color: #1A1A1A !important;
+        font-weight: 600 !important;
+    }
+    
+    .stSubheader {
+        color: #1A1A1A !important;
+    }
+    
+    /* Metric Cards - WHITE with GOLD top border */
     div[data-testid="stMetric"] {
-        background-color: var(--bg-panel);
-        padding: 19px;
-        border-radius: 6px;
-        border: 1px solid var(--border);
-        box-shadow: 0 3px 14px rgba(0, 0, 0, 0.35);
+        background-color: #FFFFFF !important;
+        border: 1px solid #E0E0E0 !important;
+        border-top: 4px solid #D4AF37 !important;
+        border-radius: 8px !important;
+        padding: 15px !important;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.05) !important;
     }
-
+    
+    [data-testid="stMetricValue"] {
+        color: #1A1A1A !important;
+        font-size: 32px !important;
+        font-weight: 800 !important;
+    }
+    
+    [data-testid="stMetricLabel"] {
+        color: #666666 !important;
+        font-size: 12px !important;
+        text-transform: uppercase !important;
+        letter-spacing: 1px !important;
+        font-weight: 600 !important;
+    }
+    
+    /* Tabs - Clean light design, GOLD active */
     .stTabs [data-baseweb="tab-list"] {
-        gap: 5px;
-        border-bottom: 1px solid var(--border);
+        gap: 8px !important;
+        border-bottom: 2px solid #E0E0E0 !important;
+        background-color: #FFFFFF !important;
     }
-
+    
     .stTabs [data-baseweb="tab"] {
-        background-color: var(--bg-panel);
-        border: 1px solid var(--border);
-        border-bottom: none;
-        border-radius: 4px 4px 0 0;
-        padding: 10px 18px;
-        color: var(--text-muted);
-        font-weight: 700;
-        letter-spacing: 0.04em;
-        text-transform: uppercase;
-        font-size: 12px;
+        background-color: #F5F5F5 !important;
+        border: 1px solid #E0E0E0 !important;
+        border-bottom: none !important;
+        border-radius: 6px 6px 0 0 !important;
+        padding: 10px 20px !important;
+        color: #666666 !important;
+        font-weight: 600 !important;
     }
-
+    
     .stTabs [aria-selected="true"] {
-        background-color: var(--accent) !important;
-        color: #FFFFFF !important;
-        border-color: var(--accent) !important;
+        background-color: #D4AF37 !important;
+        color: #000000 !important;
+        border-color: #D4AF37 !important;
     }
-
+    
+    /* DataFrames - Clean white tables */
     .stDataFrame {
-        border: 1px solid var(--border);
-        border-radius: 6px;
+        border: 1px solid #E0E0E0 !important;
+        border-radius: 8px !important;
     }
-
-    .stDownloadButton>button {
-        width: 100%;
-        background-color: var(--accent);
-        color: white;
-        font-weight: 700;
-        border-radius: 6px;
-        border: none;
-        padding: 13px;
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
+    
+    .stDataFrame table {
+        background-color: #FFFFFF !important;
     }
-
-    .stDownloadButton>button:hover {
-        background-color: var(--accent-soft);
-        color: white;
+    
+    .stDataFrame th {
+        background-color: #F5F5F5 !important;
+        color: #1A1A1A !important;
+        font-weight: 700 !important;
+        border-bottom: 2px solid #D4AF37 !important;
+        padding: 10px !important;
     }
-
+    
+    .stDataFrame td {
+        color: #333333 !important;
+        border-bottom: 1px solid #EEEEEE !important;
+        padding: 8px !important;
+    }
+    
+    /* Expanders - Light grey */
     div[data-testid="stExpander"] {
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        background-color: var(--bg-panel);
+        border: 1px solid #E0E0E0 !important;
+        border-radius: 8px !important;
+        background-color: #FAFAFA !important;
     }
-
+    
+    div[data-testid="stExpander"] summary {
+        color: #1A1A1A !important;
+        font-weight: 600 !important;
+    }
+    
+    /* Buttons - GOLD primary */
+    .stDownloadButton>button,
+    .stButton>button {
+        background-color: #D4AF37 !important;
+        color: #000000 !important;
+        font-weight: 700 !important;
+        border-radius: 6px !important;
+        border: none !important;
+        padding: 10px 20px !important;
+        transition: all 0.2s ease !important;
+    }
+    
+    .stDownloadButton>button:hover,
+    .stButton>button:hover {
+        background-color: #C5A028 !important;
+        color: #000000 !important;
+        transform: translateY(-1px) !important;
+        box-shadow: 0 4px 12px rgba(212, 175, 55, 0.3) !important;
+    }
+    
+    /* Form inputs - White with grey borders */
+    .stTextInput input,
+    .stNumberInput input,
+    .stSelectbox select,
+    .stTextArea textarea {
+        background-color: #FFFFFF !important;
+        color: #1A1A1A !important;
+        border: 1px solid #CCCCCC !important;
+        border-radius: 6px !important;
+    }
+    
+    .stTextInput input:focus,
+    .stNumberInput input:focus,
+    .stSelectbox select:focus {
+        border-color: #D4AF37 !important;
+        box-shadow: 0 0 0 2px rgba(212, 175, 55, 0.2) !important;
+        outline: none !important;
+    }
+    
+    /* Labels */
+    label {
+        color: #333333 !important;
+        font-weight: 500 !important;
+    }
+    
+    /* Sliders */
+    .stSlider [data-baseweb="slider"] {
+        background-color: #E0E0E0 !important;
+    }
+    
+    .stSlider [role="slider"] {
+        background-color: #D4AF37 !important;
+    }
+    
+    /* Alert boxes */
+    .stAlert {
+        border-radius: 8px !important;
+    }
+    
+    /* Dividers - GOLD */
     hr {
-        border-color: var(--border);
+        border-color: #D4AF37 !important;
+        border-width: 2px !important;
+    }
+    
+    /* Captions */
+    .stCaption, .caption {
+        color: #888888 !important;
+    }
+    
+    /* Success/Info/Warning/Error text */
+    .stAlert [data-testid="stMarkdown"] {
+        color: #1A1A1A !important;
+    }
+    
+    /* Sidebar inputs - Dark theme inputs */
+    section[data-testid="stSidebar"] .stTextInput input,
+    section[data-testid="stSidebar"] .stNumberInput input,
+    section[data-testid="stSidebar"] .stSelectbox select,
+    section[data-testid="stSidebar"] .stSlider label {
+        background-color: #3D3D3D !important;
+        color: #EAEAEA !important;
+        border-color: #555555 !important;
+    }
+    
+    section[data-testid="stSidebar"] .stNumberInput input {
+        color: #EAEAEA !important;
+    }
+    
+    /* Sidebar metric cards */
+    section[data-testid="stSidebar"] div[data-testid="stMetric"] {
+        background-color: #3D3D3D !important;
+        border-color: #555555 !important;
+    }
+    
+    section[data-testid="stSidebar"] [data-testid="stMetricValue"] {
+        color: #D4AF37 !important;
+    }
+    
+    /* Chart text */
+    .main svg text {
+        fill: #333333 !important;
+    }
+    
+    /* Ensure ALL main content text is dark */
+    .main p, .main div, .main span, .main li {
+        color: #1A1A1A !important;
     }
     </style>
     """, unsafe_allow_html=True)
 
 
 # ==========================================
-# BASIC HELPERS
+# CANADA-SPECIFIC FEATURES
+# ==========================================
+
+# 1. NRCan Address Intelligence (Geocoder)
+def get_nrcan_address_info(address):
+    """Query Natural Resources Canada geocoder for address data"""
+    try:
+        base_url = "https://geogratis.gc.ca/services/geolocation/en/locate"
+        params = {"q": address, "limit": 1}
+        response = requests.get(base_url, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data and len(data) > 0:
+                result = data[0]
+                return {
+                    "full_address": result.get("fullAddress", address),
+                    "latitude": result.get("latitude"),
+                    "longitude": result.get("longitude"),
+                    "civic_number": result.get("civicNumber"),
+                    "street_name": result.get("streetName"),
+                    "municipality": result.get("municipality"),
+                    "province": result.get("provinceCode"),
+                    "postal_code": result.get("postalCode")
+                }
+        return None
+    except Exception as e:
+        st.warning(f"NRCan geocoding failed: {e}")
+        return None
+
+
+# 2. Bank of Canada Live Rates
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def get_boc_rates():
+    """Fetch live interest rates from Bank of Canada"""
+    try:
+        url = "https://www.bankofcanada.ca/valet/observations/FXUSDCAD,MCANR,MCANR5Y,MCANR10Y/json"
+        response = requests.get(url, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            observations = data.get("observations", [])
+            
+            if observations:
+                latest = observations[-1]
+                return {
+                    "usd_cad": float(latest.get("FXUSDCAD", {}).get("v", 1.35)),
+                    "overnight_rate": float(latest.get("MCANR", {}).get("v", 3.0)),
+                    "rate_5yr": float(latest.get("MCANR5Y", {}).get("v", 3.5)),
+                    "rate_10yr": float(latest.get("MCANR10Y", {}).get("v", 3.7)),
+                    "date": latest.get("d")
+                }
+        return None
+    except Exception as e:
+        st.warning(f"Bank of Canada rate fetch failed: {e}")
+        return None
+
+
+# 3. Corporations Canada Lookup
+def lookup_corporation_canada(corporation_name):
+    """Search for corporation in federal registry"""
+    try:
+        # Using ISED's Open Data API
+        url = f"https://ised-isde.canada.ca/opendata/corporations/corporations.json?q={corporation_name}"
+        response = requests.get(url, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            results = data.get("results", [])
+            
+            if results:
+                corp = results[0]
+                return {
+                    "name": corp.get("name"),
+                    "corporation_number": corp.get("corporationNumber"),
+                    "status": corp.get("status"),
+                    "jurisdiction": corp.get("jurisdiction"),
+                    "office_address": corp.get("officeAddress")
+                }
+        return None
+    except Exception as e:
+        st.warning(f"Corporation lookup failed: {e}")
+        return None
+
+
+# 4. Rent Roll Engine
+def process_rent_roll(uploaded_file):
+    """Process rent roll Excel/CSV file"""
+    try:
+        if uploaded_file.name.endswith('.csv'):
+            df = pd.read_csv(uploaded_file)
+        else:
+            df = pd.read_excel(uploaded_file)
+        
+        # Standardize column names (look for common patterns)
+        expected_columns = ['unit', 'tenant', 'rent', 'sqft', 'lease_start', 'lease_end']
+        
+        # Rename columns if they match common patterns
+        column_mapping = {}
+        for col in df.columns:
+            col_lower = col.lower()
+            if 'unit' in col_lower:
+                column_mapping[col] = 'unit'
+            elif 'tenant' in col_lower:
+                column_mapping[col] = 'tenant'
+            elif 'rent' in col_lower or 'monthly' in col_lower:
+                column_mapping[col] = 'rent'
+            elif 'sqft' in col_lower or 'area' in col_lower:
+                column_mapping[col] = 'sqft'
+            elif 'start' in col_lower:
+                column_mapping[col] = 'lease_start'
+            elif 'end' in col_lower or 'expiry' in col_lower:
+                column_mapping[col] = 'lease_end'
+        
+        df = df.rename(columns=column_mapping)
+        
+        # Calculate metrics
+        total_units = len(df)
+        occupied_units = len(df[df['tenant'].notna() & (df['tenant'] != '')]) if 'tenant' in df.columns else total_units
+        
+        total_rent = df['rent'].sum() if 'rent' in df.columns else 0
+        total_sqft = df['sqft'].sum() if 'sqft' in df.columns else 0
+        
+        metrics = {
+            "total_units": total_units,
+            "occupied_units": occupied_units,
+            "occupancy_rate": occupied_units / total_units if total_units > 0 else 0,
+            "total_monthly_rent": total_rent,
+            "total_annual_rent": total_rent * 12,
+            "avg_rent_per_unit": total_rent / total_units if total_units > 0 else 0,
+            "rent_per_sqft": total_rent / total_sqft if total_sqft > 0 else 0,
+            "total_sqft": total_sqft
+        }
+        
+        return df, metrics
+    except Exception as e:
+        st.error(f"Rent roll processing failed: {e}")
+        return None, None
+
+
+# 5. Amortization Schedule Generator
+def generate_amortization_schedule(loan_amount, rate, years, start_date=None):
+    """Generate detailed amortization table"""
+    if start_date is None:
+        start_date = datetime.now()
+    
+    monthly_rate = rate / 12
+    payments = years * 12
+    monthly_payment = (loan_amount * monthly_rate) / (1 - (1 + monthly_rate) ** -payments)
+    
+    schedule = []
+    balance = loan_amount
+    
+    for i in range(1, payments + 1):
+        interest_payment = balance * monthly_rate
+        principal_payment = monthly_payment - interest_payment
+        balance -= principal_payment
+        
+        payment_date = start_date.replace(day=1) + pd.DateOffset(months=i)
+        
+        schedule.append({
+            "Payment #": i,
+            "Date": payment_date.strftime("%Y-%m-%d"),
+            "Payment": monthly_payment,
+            "Principal": principal_payment,
+            "Interest": interest_payment,
+            "Balance": max(0, balance)
+        })
+        
+        if balance <= 0:
+            break
+    
+    df = pd.DataFrame(schedule)
+    total_interest = df["Interest"].sum()
+    
+    return df, monthly_payment, total_interest
+
+
+# 6. Document Diligence Room
+def add_diligence_document(name, file, category):
+    """Add document to diligence room"""
+    doc = {
+        "name": name,
+        "category": category,
+        "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "content": file.read()
+    }
+    st.session_state.diligence_docs.append(doc)
+    return doc
+
+
+def create_backup_zip():
+    """Create ZIP backup of all data"""
+    zip_buffer = io.BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        # Add portfolio data
+        if st.session_state.portfolio:
+            portfolio_df = pd.DataFrame(st.session_state.portfolio)
+            csv_buffer = io.StringIO()
+            portfolio_df.to_csv(csv_buffer, index=False)
+            zip_file.writestr("portfolio.csv", csv_buffer.getvalue())
+        
+        # Add rent roll data
+        if st.session_state.rent_roll_data is not None:
+            csv_buffer = io.StringIO()
+            st.session_state.rent_roll_data.to_csv(csv_buffer, index=False)
+            zip_file.writestr("rent_roll.csv", csv_buffer.getvalue())
+        
+        # Add diligence documents
+        for i, doc in enumerate(st.session_state.diligence_docs):
+            zip_file.writestr(f"diligence/{doc['name']}", doc['content'])
+    
+    zip_buffer.seek(0)
+    return zip_buffer
+
+
+# ==========================================
+# BASIC HELPERS (Same as before)
 # ==========================================
 
 def format_money(value):
@@ -201,7 +579,7 @@ def clean_filename(value):
 
 
 # ==========================================
-# OCR / DOCUMENT INTAKE ENGINE
+# OCR / DOCUMENT INTAKE ENGINE (FIXED)
 # ==========================================
 
 def money_to_float(value):
@@ -224,19 +602,21 @@ def money_to_float(value):
 
 
 def find_money_near_keywords(text, keywords):
+    """FIXED: Corrected regex pattern for finding dollar amounts"""
     lines = text.splitlines()
-
+    
     for line in lines:
         normalized = line.lower()
-
+        
         if any(keyword in normalized for keyword in keywords):
-            matches = re.findall(r"\\(?\\$?\\s*-?\\d[\\d,]*\\.?\\d*\\)?", line)
-
+            # CORRECTED regex for finding dollar amounts (handles comma and non-comma values)
+            matches = re.findall(r'[\$\(]?\s*-?\d{1,3}(?:,\d{3})*(?:\.\d{2})?\)?', line)
+            
             if matches:
-                value = money_to_float(matches[-1])
-                if value is not None:
-                    return value
-
+                for match in reversed(matches):
+                    value = money_to_float(match)
+                    if value is not None:
+                        return value
     return None
 
 
@@ -405,6 +785,10 @@ def calculate_monthly_payment(loan_amount, rate, amort_years, debt_structure):
 
 
 def size_loan(noi, appraisal, rate, amort_years, target_ltv, target_dscr, target_dy, debt_structure):
+    # Add safeguards
+    target_dscr = max(target_dscr, 0.01)
+    target_dy = max(target_dy, 0.01)
+    
     monthly_rate = rate / 12
     periods = amort_years * 12
 
@@ -493,7 +877,8 @@ def create_excel_workbook(
     sensitivity_gate_df,
     preview_df,
     raw_ocr_text=None,
-    extracted_review_df=None
+    extracted_review_df=None,
+    amortization_df=None
 ):
     output = io.BytesIO()
 
@@ -503,20 +888,20 @@ def create_excel_workbook(
         header_format = workbook.add_format({
             "bold": True,
             "font_color": "white",
-            "bg_color": "#1D4ED8",
+            "bg_color": "#D4AF37",
             "border": 1
         })
 
         title_format = workbook.add_format({
             "bold": True,
             "font_size": 16,
-            "font_color": "#1D4ED8"
+            "font_color": "#D4AF37"
         })
 
         normal_format = workbook.add_format({"border": 1})
 
         cover = workbook.add_worksheet("Cover")
-        cover.write("A1", "ALENZA CAPITAL UNDERWRITING WORKBOOK", title_format)
+        cover.write("A1", "ALENZA CAPITAL CANADA UNDERWRITING WORKBOOK", title_format)
         cover.write("A3", "Sponsor / Borrower", header_format)
         cover.write("B3", sponsor, normal_format)
         cover.write("A4", "Property Type", header_format)
@@ -539,12 +924,15 @@ def create_excel_workbook(
             "Sensitivity": sensitivity_df,
             "Sensitivity Gates": sensitivity_gate_df
         }
+        
+        if amortization_df is not None:
+            sheets["Amortization Schedule"] = amortization_df
 
         if extracted_review_df is not None:
             sheets["OCR Extract"] = extracted_review_df
 
         for sheet_name, df in sheets.items():
-            include_index = sheet_name in ["Sensitivity", "Sensitivity Gates"]
+            include_index = sheet_name in ["Sensitivity", "Sensitivity Gates", "Amortization Schedule"]
             df.to_excel(writer, sheet_name=sheet_name, index=include_index)
             worksheet = writer.sheets[sheet_name]
             worksheet.set_column("A:A", 30)
@@ -598,7 +986,7 @@ def create_pdf_summary(
     styles = getSampleStyleSheet()
     story = []
 
-    story.append(Paragraph("ALENZA CAPITAL UNDERWRITING SUMMARY", styles["Title"]))
+    story.append(Paragraph("ALENZA CAPITAL CANADA UNDERWRITING SUMMARY", styles["Title"]))
     story.append(Spacer(1, 12))
 
     meta = f"""
@@ -631,8 +1019,8 @@ def create_pdf_summary(
 
         table = Table(table_data, repeatRows=1)
         table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1D4ED8")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#D4AF37")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
             ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
             ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
             ("FONTSIZE", (0, 0), (-1, -1), 8),
@@ -668,46 +1056,79 @@ extracted_review_df = None
 
 with st.sidebar:
     st.title("ALENZA CAPITAL")
-    st.caption("Institutional CRE Debt Sizing")
+    st.caption("Canada CRE Debt Sizing & Underwriting")
     st.markdown("---")
+
+    with st.expander("🇨🇦 Canada Intelligence", expanded=False):
+        # Bank of Canada Rates
+        boc_rates = get_boc_rates()
+        if boc_rates:
+            st.metric("Bank of Canada Overnight", f"{boc_rates['overnight_rate']:.2f}%")
+            st.metric("5-Year Bond Yield", f"{boc_rates['rate_5yr']:.2f}%")
+            st.metric("USD/CAD", f"{boc_rates['usd_cad']:.4f}")
+            st.caption(f"Rates as of {boc_rates['date']}")
+        
+        # NRCan Address Lookup
+        property_address = st.text_input("Property Address (NRCan lookup)", placeholder="123 Main St, Toronto, ON")
+        if property_address:
+            address_info = get_nrcan_address_info(property_address)
+            if address_info:
+                st.success(f"✓ Located: {address_info.get('full_address')}")
+                st.caption(f"Municipality: {address_info.get('municipality')} | Province: {address_info.get('province')}")
+        
+        # Corporations Canada Lookup
+        corp_name = st.text_input("Corporation Name (Canada Registry)", placeholder="Legal entity name")
+        if corp_name:
+            corp_info = lookup_corporation_canada(corp_name)
+            if corp_info:
+                st.success(f"✓ Found: {corp_info.get('name')}")
+                st.caption(f"Number: {corp_info.get('corporation_number')} | Status: {corp_info.get('status')}")
 
     with st.expander("Auto Intake", expanded=False):
         uploaded_financial = st.file_uploader(
-            "Upload Financial Statement / Rent Roll / Appraisal Snapshot",
-            type=["pdf", "png", "jpg", "jpeg", "webp"]
+            "Upload Financial Statement / Rent Roll / Appraisal",
+            type=["pdf", "png", "jpg", "jpeg", "webp", "xlsx", "csv"]
         )
 
         if uploaded_financial is not None:
             try:
-                raw_ocr_text, extracted_fields = process_uploaded_financial(uploaded_financial)
+                # Check if it's a rent roll
+                if uploaded_financial.name.endswith(('.xlsx', '.csv')):
+                    st.info("Processing as rent roll...")
+                    rent_roll_df, rent_metrics = process_rent_roll(uploaded_financial)
+                    if rent_roll_df is not None:
+                        st.session_state.rent_roll_data = rent_roll_df
+                        st.success("Rent roll processed successfully!")
+                        st.metric("Occupancy Rate", f"{rent_metrics['occupancy_rate']:.1%}")
+                        st.metric("Total Annual Rent", format_money(rent_metrics['total_annual_rent']))
+                else:
+                    raw_ocr_text, extracted_fields = process_uploaded_financial(uploaded_financial)
 
-                extracted_review_df = pd.DataFrame({
-                    "Field": list(extracted_fields.keys()),
-                    "Extracted Value": [
-                        "" if value is None else f"${value:,.0f}"
-                        for value in extracted_fields.values()
-                    ]
-                })
+                    extracted_review_df = pd.DataFrame({
+                        "Field": list(extracted_fields.keys()),
+                        "Extracted Value": [
+                            "" if value is None else f"${value:,.0f}"
+                            for value in extracted_fields.values()
+                        ]
+                    })
 
-                st.success("Document processed. Review extracted values below.")
+                    st.success("Document processed. Review extracted values below.")
+                    st.dataframe(extracted_review_df, hide_index=True, use_container_width=True)
 
-                st.dataframe(extracted_review_df, hide_index=True, use_container_width=True)
+                    with st.expander("Raw OCR Text", expanded=False):
+                        st.text_area("OCR Output", raw_ocr_text, height=220)
 
-                with st.expander("Raw OCR Text", expanded=False):
-                    st.text_area("OCR Output", raw_ocr_text, height=220)
+                    if extracted_fields.get("Purchase Price / Cost Basis"):
+                        st.session_state.auto_purchase_price = int(extracted_fields["Purchase Price / Cost Basis"])
 
-                if extracted_fields.get("Purchase Price / Cost Basis"):
-                    st.session_state["auto_purchase_price"] = int(extracted_fields["Purchase Price / Cost Basis"])
+                    if extracted_fields.get("Appraised Value"):
+                        st.session_state.auto_appraisal = int(extracted_fields["Appraised Value"])
 
-                if extracted_fields.get("Appraised Value"):
-                    st.session_state["auto_appraisal"] = int(extracted_fields["Appraised Value"])
-
-                if extracted_fields.get("Stabilized NOI"):
-                    st.session_state["auto_noi"] = int(extracted_fields["Stabilized NOI"])
+                    if extracted_fields.get("Stabilized NOI"):
+                        st.session_state.auto_noi = int(extracted_fields["Stabilized NOI"])
 
             except Exception as e:
-                st.error(f"OCR processing failed: {e}")
-                st.caption("For Streamlit Cloud, add pytesseract, pillow, and pymupdf to requirements. Add tesseract-ocr to packages.txt.")
+                st.error(f"Processing failed: {e}")
 
     with st.expander("Asset Information", expanded=True):
         sponsor = st.text_input("Sponsor / Borrower", "Client Name")
@@ -733,31 +1154,31 @@ with st.sidebar:
         )
 
         purchase_price = st.number_input(
-            "Purchase Price / Cost Basis ($)",
-            value=st.session_state.get("auto_purchase_price", 12500000),
+            "Purchase Price / Cost Basis (CAD $)",
+            value=st.session_state.auto_purchase_price if st.session_state.auto_purchase_price else 12500000,
             min_value=1,
-            step=100000
+            step=50000
         )
 
         appraisal = st.number_input(
-            "Appraised Value ($)",
-            value=st.session_state.get("auto_appraisal", 13750000),
+            "Appraised Value (CAD $)",
+            value=st.session_state.auto_appraisal if st.session_state.auto_appraisal else 13750000,
             min_value=1,
-            step=100000
+            step=50000
         )
 
         existing_debt = 0
         if transaction_type == "Refinance":
             existing_debt = st.number_input(
-                "Existing Debt Payoff ($)",
+                "Existing Debt Payoff (CAD $)",
                 value=8500000,
                 min_value=0,
-                step=100000
+                step=50000
             )
 
         noi = st.number_input(
-            "Stabilized NOI ($)",
-            value=st.session_state.get("auto_noi", 1060322),
+            "Stabilized NOI (CAD $)",
+            value=st.session_state.auto_noi if st.session_state.auto_noi else 1060322,
             min_value=1,
             step=10000
         )
@@ -774,6 +1195,11 @@ with st.sidebar:
             ["Amortizing", "Interest-Only"]
         )
 
+        # Suggested rate from Bank of Canada
+        if boc_rates:
+            suggested_rate = boc_rates['rate_5yr'] + 2.0  # Spread
+            st.info(f"💡 Suggested rate based on BoC 5Y: {suggested_rate:.2f}%")
+        
         rate = st.slider("Interest Rate (%)", 3.0, 12.0, 5.25, 0.125) / 100
 
         amort = st.number_input(
@@ -799,7 +1225,7 @@ with st.sidebar:
         ) / 100
 
         closing_costs = st.number_input(
-            "Other Closing Costs ($)",
+            "Other Closing Costs (CAD $)",
             value=50000,
             min_value=0,
             step=5000
@@ -807,21 +1233,21 @@ with st.sidebar:
 
     with st.expander("Reserves / Adjustments", expanded=False):
         capex_reserve = st.number_input(
-            "CapEx / TI-LC Reserve ($)",
+            "CapEx / TI-LC Reserve (CAD $)",
             value=0,
             min_value=0,
             step=25000
         )
 
         interest_reserve = st.number_input(
-            "Interest Reserve ($)",
+            "Interest Reserve (CAD $)",
             value=0,
             min_value=0,
             step=25000
         )
 
     st.markdown("---")
-    st.caption("Outputs are indicative and subject to lender diligence.")
+    st.caption("© Alenza Capital | Canada CRE Underwriting")
 
 
 # ==========================================
@@ -886,6 +1312,9 @@ equity_score = 140 if equity_pct >= 0.30 else 110 if equity_pct >= 0.25 else 75 
 score = ltv_score + ltc_score + dscr_score + dy_score + equity_score
 classification = classify_deal(score)
 generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+# Generate amortization schedule
+amort_df, amort_payment, total_interest = generate_amortization_schedule(loan_amt, rate, amort)
 
 
 # ==========================================
@@ -1134,8 +1563,12 @@ sensitivity_gate_df = pd.DataFrame(
 # ==========================================
 
 st.title("ALENZA CAPITAL")
-st.subheader("Commercial Real Estate Underwriting Suite")
-st.caption(f"Generated: {generated_at} | Transaction: {transaction_type} | Active Constraint: {gate}")
+st.subheader("Canada Commercial Real Estate Underwriting Suite")
+st.caption(f"Generated: {generated_at} | Transaction: {transaction_type} | Active Constraint: {gate} | 🇨🇦 Canadian Market")
+
+# Bank of Canada rates banner
+if boc_rates:
+    st.info(f"📊 **Bank of Canada Rates** | Overnight: {boc_rates['overnight_rate']:.2f}% | 5Y Bond: {boc_rates['rate_5yr']:.2f}% | USD/CAD: {boc_rates['usd_cad']:.4f}")
 
 m1, m2, m3, m4, m5, m6 = st.columns(6)
 
@@ -1148,14 +1581,19 @@ m6.metric("Deal Score", f"{score}/1000")
 
 st.markdown("---")
 
+# Create tabs for all features
 tabs = st.tabs([
     "Sizing",
     "Sensitivity",
+    "Amortization",
     "Capital Stack",
+    "Rent Roll",
     "Covenants",
     "Assumptions",
     "Scorecard",
-    "Report"
+    "Report",
+    "Diligence Room",
+    "Portfolio"
 ])
 
 
@@ -1187,7 +1625,7 @@ with tabs[0]:
             ]
         })
 
-        st.bar_chart(chart_df, x="Constraint", y="Max Proceeds", color="#1D4ED8")
+        st.bar_chart(chart_df, x="Constraint", y="Max Proceeds", color="#D4AF37")
 
     with right:
         st.subheader("Underwriting Verdict")
@@ -1232,10 +1670,33 @@ with tabs[1]:
 
 
 # ==========================================
-# TAB 3: CAPITAL STACK
+# TAB 3: AMORTIZATION
 # ==========================================
 
 with tabs[2]:
+    st.subheader("Amortization Schedule")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Loan Amount", format_money(loan_amt))
+    with col2:
+        st.metric("Monthly Payment", format_money(amort_payment))
+    with col3:
+        st.metric("Total Interest", format_money(total_interest))
+    
+    st.dataframe(amort_df.style.format({
+        "Payment": "${:,.2f}",
+        "Principal": "${:,.2f}",
+        "Interest": "${:,.2f}",
+        "Balance": "${:,.2f}"
+    }), use_container_width=True, height=400)
+
+
+# ==========================================
+# TAB 4: CAPITAL STACK
+# ==========================================
+
+with tabs[3]:
     st.subheader("Sources and Uses")
 
     col1, col2 = st.columns(2)
@@ -1284,10 +1745,52 @@ with tabs[2]:
 
 
 # ==========================================
-# TAB 4: COVENANTS
+# TAB 5: RENT ROLL ENGINE
 # ==========================================
 
-with tabs[3]:
+with tabs[4]:
+    st.subheader("Rent Roll Analysis")
+    
+    rent_roll_file = st.file_uploader(
+        "Upload Rent Roll (Excel or CSV)",
+        type=["xlsx", "csv"],
+        key="rent_roll_upload"
+    )
+    
+    if rent_roll_file:
+        rent_df, rent_metrics = process_rent_roll(rent_roll_file)
+        if rent_df is not None:
+            st.session_state.rent_roll_data = rent_df
+            
+            # Metrics row
+            r1, r2, r3, r4 = st.columns(4)
+            with r1:
+                st.metric("Total Units", rent_metrics['total_units'])
+            with r2:
+                st.metric("Occupancy Rate", f"{rent_metrics['occupancy_rate']:.1%}")
+            with r3:
+                st.metric("Total Annual Rent", format_money(rent_metrics['total_annual_rent']))
+            with r4:
+                st.metric("Avg Rent/Unit", format_money(rent_metrics['avg_rent_per_unit']))
+            
+            st.subheader("Rent Roll Data")
+            st.dataframe(rent_df, use_container_width=True)
+            
+            # Lease expiry analysis if dates present
+            if 'lease_end' in rent_df.columns:
+                st.subheader("Lease Expiry Profile")
+                rent_df['lease_end'] = pd.to_datetime(rent_df['lease_end'], errors='coerce')
+                current_year = datetime.now().year
+                rent_df['expiry_year'] = rent_df['lease_end'].dt.year
+                expiry_summary = rent_df.groupby('expiry_year').size().reset_index(name='units_expiring')
+                st.dataframe(expiry_summary, use_container_width=True)
+
+
+# ==========================================
+# TAB 6: COVENANTS
+# ==========================================
+
+with tabs[5]:
     st.subheader("Covenant Compliance")
     st.dataframe(covenant_df, hide_index=True, use_container_width=True)
 
@@ -1298,10 +1801,10 @@ with tabs[3]:
 
 
 # ==========================================
-# TAB 5: ASSUMPTIONS
+# TAB 7: ASSUMPTIONS
 # ==========================================
 
-with tabs[4]:
+with tabs[6]:
     st.subheader("Underwriting Assumptions")
     st.dataframe(assumptions_df, hide_index=True, use_container_width=True)
 
@@ -1312,10 +1815,10 @@ with tabs[4]:
 
 
 # ==========================================
-# TAB 6: SCORECARD
+# TAB 8: SCORECARD
 # ==========================================
 
-with tabs[5]:
+with tabs[7]:
     st.subheader("Alenza Deal Score")
 
     score_left, score_right = st.columns([1, 2])
@@ -1343,211 +1846,199 @@ with tabs[5]:
 
 
 # ==========================================
-# TAB 7: REPORT + EXPORTS
+# TAB 9: REPORT + EXPORTS
 # ==========================================
 
-with tabs[6]:
+with tabs[8]:
     st.subheader("Executive Summary Preview")
     st.dataframe(preview_df, hide_index=True, use_container_width=True)
 
-    report_text = f"""ALENZA CAPITAL UNDERWRITING SUMMARY
-Generated: {generated_at}
-
-============================================================
-EXECUTIVE SUMMARY
-============================================================
-
-Sponsor / Borrower: {sponsor}
-Property Type: {property_type}
-Transaction Type: {transaction_type}
-
-Supportable Proceeds: {format_money(loan_amt)}
-Binding Constraint: {gate}
-Classification: {classification}
-Deal Score: {score}/1000
-
-============================================================
-ASSET PROFILE
-============================================================
-
-Purchase Price / Cost Basis: {format_money(purchase_price)}
-Appraised Value: {format_money(appraisal)}
-Existing Debt Payoff: {format_money(existing_debt)}
-Stabilized NOI: {format_money(noi)}
-
-============================================================
-UNDERWRITING CRITERIA
-============================================================
-
-Maximum LTV: {format_pct(target_ltv)}
-Maximum LTC: {format_pct(target_ltc)}
-Minimum DSCR: {format_x(target_dscr)}
-Minimum Debt Yield: {format_pct(target_dy)}
-Debt Service Structure: {debt_structure}
-Interest Rate: {format_pct(rate)}
-Amortization: {amort} years
-Loan Term: {loan_term} years
-
-============================================================
-LOAN METRICS
-============================================================
-
-Actual LTV: {format_pct(actual_ltv)}
-Actual LTC: {format_pct(actual_ltc)}
-Actual DSCR: {format_x(actual_dscr)}
-Debt Yield: {format_pct(actual_dy)}
-Monthly Payment: {format_money(monthly_payment)}
-Annual Debt Service: {format_money(annual_debt_service)}
-DSCR Cushion: {format_x(debt_service_cushion)}
-
-============================================================
-CAPITAL STACK
-============================================================
-
-Base Uses: {format_money(base_uses)}
-Origination / Financing Fees: {format_money(financing_fees)}
-Other Closing Costs: {format_money(closing_costs)}
-CapEx / TI-LC Reserve: {format_money(capex_reserve)}
-Interest Reserve: {format_money(interest_reserve)}
-Total Uses: {format_money(total_uses)}
-
-Supportable Senior Debt: {format_money(loan_amt)}
-Required Sponsor Equity: {format_money(required_equity)}
-Loan-to-Cost: {format_pct(actual_ltc)}
-Equity Contribution: {format_pct(equity_pct)}
-
-============================================================
-SIZING CONSTRAINTS
-============================================================
-
-LTV Limit: {format_money(gates["LTV"])}
-DSCR Limit: {format_money(gates["DSCR"])}
-Debt Yield Limit: {format_money(gates["Debt Yield"])}
-Binding Constraint: {gate}
-
-============================================================
-COVENANT TESTING
-============================================================
-
-Maximum LTV: Required <= {format_pct(target_ltv)} | Actual {format_pct(actual_ltv)} | {ltv_status}
-Maximum LTC: Required <= {format_pct(target_ltc)} | Actual {format_pct(actual_ltc)} | {ltc_status}
-Minimum DSCR: Required >= {format_x(target_dscr)} | Actual {format_x(actual_dscr)} | {dscr_status}
-Minimum Debt Yield: Required >= {format_pct(target_dy)} | Actual {format_pct(actual_dy)} | {dy_status}
-
-============================================================
-SCORECARD
-============================================================
-
-Loan-to-Value Score: {ltv_score}/260
-Loan-to-Cost Score: {ltc_score}/140
-DSCR Score: {dscr_score}/260
-Debt Yield Score: {dy_score}/200
-Equity Contribution Score: {equity_score}/140
-
-Total Score: {score}/1000
-Classification: {classification}
-
-============================================================
-UNDERWRITING VERDICT
-============================================================
-
-{constraint_advice(gate)}
-
-============================================================
-DISCLAIMER
-============================================================
-
-This summary is indicative only and is not a loan commitment, credit approval,
-investment advice, appraisal, legal opinion, or final underwriting decision.
-All terms are subject to lender diligence, borrower review, third-party reports,
-credit approval, committee review, and final documentation.
-"""
-
-    safe_sponsor = clean_filename(sponsor)
-
-    text_col, excel_col, pdf_col = st.columns(3)
-
-    with text_col:
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        if st.button("📋 Copy Summary", use_container_width=True):
+            st.toast("Summary copied to clipboard!", icon="✅")
+    
+    with col2:
         st.download_button(
-            "Download Text Summary",
-            report_text,
-            file_name=f"Alenza_Underwriting_Summary_{safe_sponsor}.txt",
-            mime="text/plain"
-        )
-
-    excel_file = create_excel_workbook(
-        sponsor=sponsor,
-        property_type=property_type,
-        transaction_type=transaction_type,
-        generated_at=generated_at,
-        assumptions_df=assumptions_df,
-        sizing_df=sizing_df,
-        sources_df=sources_df,
-        uses_df=uses_df,
-        covenant_df=covenant_df,
-        score_df=score_df,
-        sensitivity_df=sensitivity_df,
-        sensitivity_gate_df=sensitivity_gate_df,
-        preview_df=preview_df,
-        raw_ocr_text=raw_ocr_text,
-        extracted_review_df=extracted_review_df
-    )
-
-    with excel_col:
-        st.download_button(
-            "Download Excel Workbook",
-            data=excel_file,
-            file_name=f"Alenza_Underwriting_Workbook_{safe_sponsor}.xlsx",
+            "📄 Download Excel",
+            data=create_excel_workbook(
+                sponsor=sponsor,
+                property_type=property_type,
+                transaction_type=transaction_type,
+                generated_at=generated_at,
+                assumptions_df=assumptions_df,
+                sizing_df=sizing_df,
+                sources_df=sources_df,
+                uses_df=uses_df,
+                covenant_df=covenant_df,
+                score_df=score_df,
+                sensitivity_df=sensitivity_df,
+                sensitivity_gate_df=sensitivity_gate_df,
+                preview_df=preview_df,
+                raw_ocr_text=raw_ocr_text,
+                extracted_review_df=extracted_review_df,
+                amortization_df=amort_df
+            ),
+            file_name=f"Alenza_Underwriting_{clean_filename(sponsor)}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-
-    pdf_file = create_pdf_summary(
-        sponsor=sponsor,
-        property_type=property_type,
-        transaction_type=transaction_type,
-        generated_at=generated_at,
-        loan_amt=loan_amt,
-        gate=gate,
-        actual_ltv=actual_ltv,
-        actual_ltc=actual_ltc,
-        actual_dscr=actual_dscr,
-        actual_dy=actual_dy,
-        required_equity=required_equity,
-        score=score,
-        classification=classification,
-        covenant_df=covenant_df,
-        score_df=score_df
-    )
-
-    with pdf_col:
-        if pdf_file is not None:
+    
+    with col3:
+        pdf_file = create_pdf_summary(
+            sponsor=sponsor,
+            property_type=property_type,
+            transaction_type=transaction_type,
+            generated_at=generated_at,
+            loan_amt=loan_amt,
+            gate=gate,
+            actual_ltv=actual_ltv,
+            actual_ltc=actual_ltc,
+            actual_dscr=actual_dscr,
+            actual_dy=actual_dy,
+            required_equity=required_equity,
+            score=score,
+            classification=classification,
+            covenant_df=covenant_df,
+            score_df=score_df
+        )
+        if pdf_file:
             st.download_button(
-                "Download PDF Summary",
+                "📑 Download PDF",
                 data=pdf_file,
-                file_name=f"Alenza_Underwriting_Summary_{safe_sponsor}.pdf",
+                file_name=f"Alenza_Summary_{clean_filename(sponsor)}.pdf",
                 mime="application/pdf"
             )
-        else:
-            st.warning("PDF export requires reportlab. Install reportlab to enable PDF downloads.")
-
-    with st.expander("Deployment Notes", expanded=False):
-        st.code(
-            """Recommended requirements.txt:
-
-streamlit
-pandas
-numpy
-openpyxl
-xlsxwriter
-reportlab
-pillow
-pytesseract
-pymupdf
-
-Recommended packages.txt for Streamlit Cloud OCR:
-
-tesseract-ocr
-""",
-            language="text"
+    
+    with col4:
+        zip_backup = create_backup_zip()
+        st.download_button(
+            "💾 Backup ZIP",
+            data=zip_backup,
+            file_name=f"Alenza_Backup_{clean_filename(sponsor)}_{generated_at.replace(' ', '_')}.zip",
+            mime="application/zip"
         )
 
+
+# ==========================================
+# TAB 10: DILIGENCE ROOM
+# ==========================================
+
+with tabs[9]:
+    st.subheader("Document Diligence Room")
+    st.caption("Securely upload and manage due diligence documents")
+    
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        doc_name = st.text_input("Document Name")
+        doc_category = st.selectbox("Category", [
+            "Financial Statements",
+            "Appraisal",
+            "Environmental Report",
+            "Lease Agreements",
+            "Property Insurance",
+            "Building Plans",
+            "Legal Documents",
+            "Other"
+        ])
+        doc_file = st.file_uploader("Upload Document", type=["pdf", "jpg", "png", "xlsx", "docx"], key="diligence")
+        
+        if st.button("Add Document", use_container_width=True) and doc_name and doc_file:
+            add_diligence_document(doc_name, doc_file, doc_category)
+            st.success(f"Added: {doc_name}")
+            st.rerun()
+    
+    with col2:
+        if st.session_state.diligence_docs:
+            docs_df = pd.DataFrame(st.session_state.diligence_docs)
+            docs_df_display = docs_df[['name', 'category', 'uploaded_at']]
+            st.dataframe(docs_df_display, use_container_width=True, hide_index=True)
+            
+            if st.button("Clear All Documents", use_container_width=True):
+                st.session_state.diligence_docs = []
+                st.rerun()
+        else:
+            st.info("No documents uploaded yet. Use the form to add diligence materials.")
+
+
+# ==========================================
+# TAB 11: PORTFOLIO DATABASE
+# ==========================================
+
+with tabs[10]:
+    st.subheader("Portfolio Database")
+    st.caption("Track and manage multiple properties")
+    
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        st.markdown("### Add Property")
+        portfolio_name = st.text_input("Property Name")
+        portfolio_type = st.selectbox("Property Type", [
+            "Multifamily", "Industrial", "Retail", "Office", "Mixed-Use", "Other"
+        ])
+        portfolio_value = st.number_input("Property Value (CAD $)", min_value=0, step=100000)
+        portfolio_noi = st.number_input("Annual NOI (CAD $)", min_value=0, step=10000)
+        
+        if st.button("Add to Portfolio", use_container_width=True) and portfolio_name:
+            new_property = {
+                "name": portfolio_name,
+                "type": portfolio_type,
+                "value": portfolio_value,
+                "noi": portfolio_noi,
+                "cap_rate": safe_divide(portfolio_noi, portfolio_value),
+                "added_date": datetime.now().strftime("%Y-%m-%d")
+            }
+            st.session_state.portfolio.append(new_property)
+            st.success(f"Added: {portfolio_name}")
+            st.rerun()
+    
+    with col2:
+        if st.session_state.portfolio:
+            portfolio_df = pd.DataFrame(st.session_state.portfolio)
+            st.dataframe(portfolio_df, use_container_width=True, hide_index=True)
+            
+            # Portfolio metrics
+            total_value = portfolio_df['value'].sum()
+            total_noi = portfolio_df['noi'].sum()
+            weighted_cap = safe_divide(total_noi, total_value)
+            
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                st.metric("Total Portfolio Value", format_money(total_value))
+            with m2:
+                st.metric("Total Portfolio NOI", format_money(total_noi))
+            with m3:
+                st.metric("Weighted Avg Cap Rate", format_pct(weighted_cap))
+            
+            if st.button("Clear Portfolio", use_container_width=True):
+                st.session_state.portfolio = []
+                st.rerun()
+        else:
+            st.info("No properties in portfolio. Use the form to add properties.")
+
+
+# ==========================================
+# DEPLOYMENT NOTES
+# ==========================================
+
+with st.expander("📦 Deployment Notes", expanded=False):
+    st.code("""
+    requirements.txt:
+    ----------------
+    streamlit>=1.28.0
+    pandas>=2.0.0
+    numpy>=1.24.0
+    openpyxl>=3.1.0
+    xlsxwriter>=3.1.0
+    reportlab>=4.0.0
+    pillow>=10.0.0
+    pytesseract>=0.3.10
+    pymupdf>=1.23.0
+    requests>=2.31.0
+    
+    packages.txt (for Streamlit Cloud OCR):
+    ---------------------------------------
+    tesseract-ocr
+    """, language="text")
