@@ -1,0 +1,26 @@
+# Local database and generated files
+alenza_data/*.db
+alenza_data/*.sqlite
+alenza_data/*.sqlite3
+alenza_data/documents/*
+alenza_data/backups/*
+alenza_data/exports/*
+
+# Keep folders
+!alenza_data/documents/.gitkeep
+!alenza_data/backups/.gitkeep
+!alenza_data/exports/.gitkeep
+
+# Secrets
+.streamlit/secrets.toml
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
