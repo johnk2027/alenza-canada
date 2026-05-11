@@ -67,7 +67,10 @@ secrets/
 
 # Streamlit specific
 .streamlit/secrets.toml
-.streamlit/config.toml
+
+# NOTE: .streamlit/config.toml should usually be TRACKED in git
+# Only ignore if it contains secrets (use secrets.toml for that)
+# .streamlit/config.toml
 
 # Exported files (optional - uncomment if you don't want to track exports)
 # exports/
@@ -88,9 +91,3 @@ backup/
 # Windows specific
 desktop.ini
 $RECYCLE.BIN/
-
-# Large data files (uncomment if you have large datasets)
-# data/
-# *.parquet
-# *.h5
-# *.hdf5
