@@ -1,6 +1,5 @@
 """
 Alenza Capital OS v3.3.0 - The Ultimate Edition
-Restores NRCan Geocoding, Automated Commentary, Vacancy Data, Rate Locking, and Encrypted JSON.
 """
 
 from __future__ import annotations
