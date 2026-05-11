@@ -1,19 +1,12 @@
-"""
+""
 ALENZA CAPITAL OS - ENTERPRISE UNDERWRITING TERMINAL
-Version: 7.3
+Version: 7.3 
 Theme: Midnight Slate & CU Gold (Unified Dark Mode)
 
 This app provides SQLite persistence, Canadian sovereign data integrations,
 OCR financial parsing, rent-roll normalization/import, CRE debt sizing,
 risk analysis, amortization charts, and export tooling.
 
-Patch focus:
-- Prevents rent-roll KeyError when saved data is empty/malformed.
-- Adds true "New Deal" reset flow.
-- Adds CSV/XLSX rent-roll auto import.
-- Makes Canada API integrations fail gracefully.
-- Improves amortization visuals and schedule formatting.
-- Preserves the existing dark/gold visual design.
 """
 
 import streamlit as st
@@ -1651,18 +1644,41 @@ with tabs[6]:
 
     with ca1:
         st.write("### Live Bank of Canada Rates")
+        st.caption("FX pairs, overnight money-market rates, and Government of Canada benchmark yields from the Bank of Canada Valet API.")
         boc = CanadianIntel.get_boc_rates()
 
         if boc and not boc.get("error"):
-            if boc.get("5yr_bond") is not None:
-                st.metric("5-Year Canada Yield", f"{boc['5yr_bond']:.2f}%")
-            if boc.get("2yr_bond") is not None:
-                st.metric("2-Year Canada Yield", f"{boc['2yr_bond']:.2f}%")
-            if boc.get("10yr_bond") is not None:
-                st.metric("10-Year Canada Yield", f"{boc['10yr_bond']:.2f}%")
-            if boc.get("usd_cad") is not None:
-                st.metric("USD/CAD", f"{boc['usd_cad']:.4f}")
-            st.caption(f"Last Updated: {boc.get('date')}")
+            dates = boc.get("dates", {}) or {}
+
+            fx1, fx2 = st.columns(2)
+            fx1.metric("USD → CAD", f"{boc['usd_cad']:.4f}" if boc.get("usd_cad") is not None else "N/A")
+            fx2.metric("EUR → CAD", f"{boc['eur_cad']:.4f}" if boc.get("eur_cad") is not None else "N/A")
+
+            r1, r2 = st.columns(2)
+            r1.metric("Overnight Rate", f"{boc['overnight_rate']:.2f}%" if boc.get("overnight_rate") is not None else "N/A")
+            r2.metric("Overnight Target", f"{boc['overnight_target']:.2f}%" if boc.get("overnight_target") is not None else "N/A")
+
+            y1, y2, y3 = st.columns(3)
+            y1.metric("Canada 2Y", f"{boc['2yr_bond']:.2f}%" if boc.get("2yr_bond") is not None else "N/A")
+            y2.metric("Canada 5Y", f"{boc['5yr_bond']:.2f}%" if boc.get("5yr_bond") is not None else "N/A")
+            y3.metric("Canada 10Y", f"{boc['10yr_bond']:.2f}%" if boc.get("10yr_bond") is not None else "N/A")
+
+            rate_rows = [
+                {"Series": "USD/CAD", "Value": boc.get("usd_cad"), "Date": dates.get("usd_cad_date")},
+                {"Series": "EUR/CAD", "Value": boc.get("eur_cad"), "Date": dates.get("eur_cad_date")},
+                {"Series": "Overnight Rate", "Value": boc.get("overnight_rate"), "Date": dates.get("overnight_rate_date")},
+                {"Series": "Overnight Target", "Value": boc.get("overnight_target"), "Date": dates.get("overnight_target_date")},
+                {"Series": "Canada 2Y Yield", "Value": boc.get("2yr_bond"), "Date": dates.get("2yr_bond_date")},
+                {"Series": "Canada 5Y Yield", "Value": boc.get("5yr_bond"), "Date": dates.get("5yr_bond_date")},
+                {"Series": "Canada 10Y Yield", "Value": boc.get("10yr_bond"), "Date": dates.get("10yr_bond_date")},
+            ]
+            rate_df = pd.DataFrame(rate_rows)
+            st.dataframe(
+                rate_df.style.format({"Value": lambda x: "N/A" if pd.isna(x) else f"{x:,.4f}"}),
+                hide_index=True,
+                use_container_width=True,
+            )
+            st.caption(f"Latest available observation across series: {boc.get('date') or 'N/A'}")
         else:
             st.info("Bank of Canada API currently unavailable.")
             if boc and boc.get("error"):
