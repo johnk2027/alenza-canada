@@ -60,3 +60,37 @@ htmlcov/
 *.key
 *.crt
 secrets/
+
+# ==========================================
+# ALENZA CAPITAL OS SPECIFIC ADDITIONS
+# ==========================================
+
+# Streamlit specific
+.streamlit/secrets.toml
+.streamlit/config.toml
+
+# Exported files (optional - uncomment if you don't want to track exports)
+# exports/
+# *.xlsx
+# *.zip
+
+# Backup files
+*.backup
+*.bak
+backup/
+
+# Jupyter notebooks (if you use them for testing)
+*.ipynb_checkpoints/
+
+# macOS quarantine
+*.com.apple.quarantine
+
+# Windows specific
+desktop.ini
+$RECYCLE.BIN/
+
+# Large data files (uncomment if you have large datasets)
+# data/
+# *.parquet
+# *.h5
+# *.hdf5
