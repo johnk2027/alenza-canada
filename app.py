@@ -1,13 +1,6 @@
-""
-ALENZA CAPITAL OS - ENTERPRISE UNDERWRITING TERMINAL
-Version: 7.3 
-Theme: Midnight Slate & CU Gold (Unified Dark Mode)
-
-This app provides SQLite persistence, Canadian sovereign data integrations,
-OCR financial parsing, rent-roll normalization/import, CRE debt sizing,
-risk analysis, amortization charts, and export tooling.
-
-"""
+# Alenza Capital OS
+# Enterprise underwriting workspace
+# Midnight Slate and CU Gold theme
 
 import streamlit as st
 import pandas as pd
@@ -25,9 +18,6 @@ from pathlib import Path
 from typing import Dict, Any, Tuple, List, Optional
 
 
-# ==========================================
-# 1. PAGE CONFIGURATION
-# ==========================================
 st.set_page_config(
     page_title="Alenza Capital OS",
     page_icon="🏛️",
@@ -36,9 +26,6 @@ st.set_page_config(
 )
 
 
-# ==========================================
-# DEPENDENCIES & GRACEFUL DEGRADATION
-# ==========================================
 try:
     from PIL import Image
     import pytesseract
@@ -59,28 +46,11 @@ except Exception:
 
 try:
     import xlsxwriter  # noqa: F401
-    XLSXWRITER_AVAILABLE = True
+    EXCEL_AVAILABLE = True
 except Exception:
-    XLSXWRITER_AVAILABLE = False
-
-try:
-    import openpyxl  # noqa: F401
-    OPENPYXL_AVAILABLE = True
-except Exception:
-    OPENPYXL_AVAILABLE = False
-
-try:
-    import xlrd  # noqa: F401
-    XLRD_AVAILABLE = True
-except Exception:
-    XLRD_AVAILABLE = False
-
-EXCEL_AVAILABLE = XLSXWRITER_AVAILABLE or OPENPYXL_AVAILABLE
+    EXCEL_AVAILABLE = False
 
 
-# ==========================================
-# 2. DIRECTORY & DATABASE ARCHITECTURE
-# ==========================================
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "alenza_data"
 DB_PATH = DATA_DIR / "alenza_platform.db"
@@ -97,17 +67,8 @@ def clean_filename(filename: str) -> str:
     return base[:150] or "file"
 
 
-def make_document_storage_id(filename: str) -> str:
-    """Create a short unique physical filename to avoid OS path-length failures."""
-    safe_name = clean_filename(filename)
-    stem = Path(safe_name).stem[:48] or "document"
-    suffix = Path(safe_name).suffix[:12]
-    unique = uuid.uuid4().hex
-    return f"doc_{int(datetime.now().timestamp())}_{unique}_{stem}{suffix}"[:200]
-
-
 def safe_float(value: Any, default: float = 0.0) -> float:
-    """Convert user/session/API values to float safely."""
+    """Convert a value to float."""
     try:
         if value is None or value == "":
             return default
@@ -119,7 +80,7 @@ def safe_float(value: Any, default: float = 0.0) -> float:
 
 
 def safe_int(value: Any, default: int = 0) -> int:
-    """Convert values to int safely."""
+    """Convert a value to int."""
     try:
         return int(float(value))
     except Exception:
@@ -134,9 +95,6 @@ def normalize_percent(value: Any, default: float) -> float:
     return x
 
 
-# ==========================================
-# 3. DEFAULT STATE & STATE HELPERS
-# ==========================================
 DEFAULT_RENT_ROLL = [
     {"Tenant": "Main Anchor", "SF": 25000, "Remaining Term": 5.5, "Monthly Rent": 45000},
     {"Tenant": "In-Line A", "SF": 3500, "Remaining Term": 1.2, "Monthly Rent": 8000},
@@ -265,7 +223,7 @@ def normalize_loaded_state(state: dict) -> dict:
 
 
 def extract_clean_state() -> dict:
-    """Safely extract only JSON-serializable primitives from session state."""
+    """Collect deal fields for storage and export."""
     keys = [
         "deal_id", "sponsor", "property_address", "property_type", "transaction_type",
         "lender_profile", "purchase_price", "appraisal", "noi", "target_ltv",
@@ -285,15 +243,6 @@ def extract_clean_state() -> dict:
     return state
 
 
-def state_signature(state: Optional[dict] = None) -> str:
-    """Create a stable signature for detecting unsaved deal changes."""
-    payload = state if state is not None else extract_clean_state()
-    try:
-        return json.dumps(payload, sort_keys=True, default=str)
-    except Exception:
-        return str(payload)
-
-
 def reset_to_new_deal():
     """Start a clean deal while preserving app defaults."""
     fresh = DEFAULT_STATE.copy()
@@ -309,7 +258,6 @@ def reset_to_new_deal():
 
     for k, v in fresh.items():
         st.session_state[k] = v
-    st.session_state["last_saved_signature"] = ""
 
 
 for k, v in normalize_loaded_state(DEFAULT_STATE).items():
@@ -317,9 +265,6 @@ for k, v in normalize_loaded_state(DEFAULT_STATE).items():
         st.session_state[k] = v
 
 
-# ==========================================
-# 4. DATABASE MANAGER
-# ==========================================
 class DatabaseManager:
     @staticmethod
     def init_db():
@@ -409,7 +354,7 @@ class DatabaseManager:
     @staticmethod
     def save_document(deal_id: str, file, category: str):
         safe_name = clean_filename(file.name)
-        doc_id = make_document_storage_id(safe_name)
+        doc_id = f"doc_{int(datetime.now().timestamp())}_{uuid.uuid4().hex[:6]}_{safe_name}"
         path = DOC_DIR / doc_id
         path.write_bytes(file.getbuffer())
 
@@ -442,14 +387,11 @@ class DatabaseManager:
 DatabaseManager.init_db()
 
 
-# ==========================================
-# 5. CANADIAN SOVEREIGN INTELLIGENCE
-# ==========================================
 class CanadianIntel:
     @staticmethod
     @st.cache_data(ttl=3600)
     def get_boc_rates():
-        """Fetch Canadian market rates from Bank of Canada Valet with graceful fallback."""
+        """Fetch Canadian market rates from Bank of Canada Valet."""
         try:
             url = (
                 "https://www.bankofcanada.ca/valet/observations/"
@@ -549,7 +491,7 @@ class CanadianIntel:
     @staticmethod
     @st.cache_data(ttl=86400)
     def geocode_nrcan(address: str):
-        """Try current Geo.ca geolocation API first, then fallback legacy endpoint."""
+        """Find an address using Canadian geolocation services."""
         if not address:
             return None
 
@@ -598,9 +540,6 @@ class CanadianIntel:
         return None
 
 
-# ==========================================
-# 6. OCR & EXPORT ENGINES
-# ==========================================
 class OCREngine:
     @staticmethod
     def calculate_confidence(match: str, line: str, keyword: str) -> float:
@@ -624,22 +563,10 @@ class OCREngine:
         text = ""
 
         try:
-            try:
-                file.seek(0)
-            except Exception:
-                pass
-
             if file.name.lower().endswith(".pdf") and fitz:
-                pdf_bytes = file.read()
-                if not pdf_bytes:
-                    return "", {}
-                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                doc = fitz.open(stream=file.read(), filetype="pdf")
                 text = "\n".join([page.get_text() for page in doc])
             elif Image and pytesseract:
-                try:
-                    file.seek(0)
-                except Exception:
-                    pass
                 text = pytesseract.image_to_string(Image.open(file))
         except Exception:
             return "", {}
@@ -696,10 +623,7 @@ class ExportEngine:
     def generate_excel(state: dict, loan_amt: float, gate: str, amort_df: pd.DataFrame, score: int, tier: str) -> bytes:
         output = io.BytesIO()
 
-        if not EXCEL_AVAILABLE:
-            raise RuntimeError("Excel export requires either xlsxwriter or openpyxl. Add one to requirements.txt.")
-
-        engine = "xlsxwriter" if XLSXWRITER_AVAILABLE else "openpyxl"
+        engine = "xlsxwriter" if EXCEL_AVAILABLE else "openpyxl"
         with pd.ExcelWriter(output, engine=engine) as writer:
             fmt_header = None
             if engine == "xlsxwriter":
@@ -765,7 +689,7 @@ class ExportEngine:
         story.append(Spacer(1, 12))
 
         meta = f"""
-        <b>Generated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M')}<br/>
+        <b>Prepared:</b> {datetime.now().strftime('%Y-%m-%d %H:%M')}<br/>
         <b>Sponsor:</b> {state.get('sponsor') or 'N/A'}<br/>
         <b>Property:</b> {state.get('property_address') or 'N/A'} ({state.get('property_type') or 'N/A'})<br/>
         """
@@ -786,14 +710,12 @@ class ExportEngine:
 
         story.append(Paragraph("Risk & Structural Analysis", styles["Heading2"]))
         for flag in risk_flags:
-            clean_flag = str(flag)
-            clean_flag = clean_flag.replace("🚨", "[CRITICAL]").replace("⚠️", "[WARNING]").replace("⚠", "[WARNING]").replace("✅", "[OK]")
-            clean_flag = re.sub(r"[^\x00-\x7F]+", "", clean_flag).strip()
+            clean_flag = re.sub(r"[^\x00-\x7F]+", "", str(flag)).strip()
             story.append(Paragraph(f"- {clean_flag}", styles["Normal"]))
         story.append(Spacer(1, 16))
 
         disclaimer = (
-            "This document is generated by Alenza OS. It is indicative only and does not constitute "
+            "This document was prepared in Alenza OS. It is indicative only and does not constitute "
             "a loan commitment, credit approval, or legal advice. Subject to final lender diligence."
         )
         story.append(Paragraph("Disclaimer", styles["Heading2"]))
@@ -803,9 +725,6 @@ class ExportEngine:
         return buffer.getvalue()
 
 
-# ==========================================
-# 7. ADVANCED UNDERWRITING ENGINE
-# ==========================================
 class UnderwritingEngine:
     LENDER_PROFILES = {
         "Bank / Credit Union": {"max_ltv": 0.75, "min_dscr": 1.25, "min_dy": 0.08},
@@ -1011,7 +930,7 @@ class MarketCompsEngine:
             comps.append({
                 "Comparable": f"{property_type} Asset {chr(64 + i)}",
                 "Distance (km)": round(np.random.uniform(0.5, 8.0), 1),
-                "Sale Date": f"{np.random.randint(max(2023, datetime.now().year - 2), datetime.now().year + 1)}-{np.random.randint(1, 13):02d}",
+                "Sale Date": f"202{np.random.randint(4, 6)}-{np.random.randint(1, 13):02d}",
                 "Cap Rate": f"{comp_cap * 100:.2f}%",
                 "Est. Value": f"${comp_value:,.0f}",
             })
@@ -1019,9 +938,6 @@ class MarketCompsEngine:
         return pd.DataFrame(comps)
 
 
-# ==========================================
-# 8. UI/UX: FULL DARK MODE CSS
-# ==========================================
 st.markdown(
     """
     <style>
@@ -1037,14 +953,14 @@ st.markdown(
     section[data-testid="stSidebar"] * { color: #F3F4F6 !important; }
     section[data-testid="stSidebar"] h1, section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 { color: #CFB87C !important; }
 
-    /* Fix for Sidebar Captions and Disclaimers */
+    /* Sidebar captions */
     section[data-testid="stSidebar"] .stCaption,
     section[data-testid="stSidebar"] small,
     section[data-testid="stSidebar"] p[data-testid="stMarkdownContainer"] > em {
         color: #9CA3AF !important;
     }
 
-    /* Form Inputs (Sidebar & Main) */
+    /* Inputs */
     .stTextInput input, .stNumberInput input, .stSelectbox select {
         background-color: #111827 !important;
         border: 1px solid #1E293B !important;
@@ -1113,45 +1029,21 @@ st.markdown(
         background-color: #111827 !important;
         border: 1px dashed #CFB87C !important;
     }
-
-    /* Touch and narrow viewport improvements while preserving the palette */
-    div[data-testid="stDataEditor"] td { min-height: 44px !important; }
-    div[data-testid="stDataEditor"] [role="gridcell"] { min-height: 44px !important; }
-
-    @media (max-width: 768px) {
-        div[data-testid="stMetric"] { min-width: 140px !important; padding: 12px !important; }
-        [data-testid="stMetricValue"] { font-size: 22px !important; }
-        .stTabs [data-baseweb="tab"] { font-size: 10px !important; padding: 6px 4px !important; }
-        .stTabs [data-baseweb="tab-list"] { gap: 4px !important; overflow-x: auto !important; flex-wrap: nowrap !important; }
-    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 
-# ==========================================
-# 9. SIDEBAR COMMAND CENTER & STATE
-# ==========================================
 with st.sidebar:
     st.title("🏛️ ALENZA OS")
 
     with st.expander("📁 PIPELINE MANAGER", expanded=True):
         all_deals = DatabaseManager.get_all_deals()
-        deal_lookup = {}
-        deal_options = ["-- Start New Deal --"]
-        if not all_deals.empty:
-            for _, row in all_deals.iterrows():
-                updated = str(row.get("updated_at", ""))[:19]
-                label = f"{row.get('name', 'Unnamed Deal')} | {updated} | {str(row.get('id', ''))[-8:]}"
-                deal_lookup[label] = row.get("id")
-                deal_options.append(label)
-
+        deal_options = ["-- Start New Deal --"] + all_deals["name"].tolist()
         selected = st.selectbox("Select Deal", deal_options)
-        selected_deal_id = deal_lookup.get(selected)
 
-        c_new, c_load = st.columns(2)
-        c_del, c_dup = st.columns(2)
+        c_new, c_load, c_del, c_dup = st.columns(4)
 
         with c_new:
             if st.button("➕ New"):
@@ -1160,31 +1052,27 @@ with st.sidebar:
                 st.rerun()
 
         with c_load:
-            if st.button("📂 Load") and selected_deal_id:
-                loaded_state = DatabaseManager.load_deal(selected_deal_id)
+            if st.button("📂 Load") and selected != "-- Start New Deal --":
+                deal_id_to_load = all_deals.loc[all_deals["name"] == selected, "id"].values[0]
+                loaded_state = DatabaseManager.load_deal(deal_id_to_load)
                 if loaded_state:
                     for k, v in loaded_state.items():
                         st.session_state[k] = v
-                    st.session_state.deal_id = loaded_state.get("deal_id", selected_deal_id)
-                    st.session_state["last_saved_signature"] = state_signature(loaded_state)
+                    st.session_state.deal_id = loaded_state.get("deal_id", deal_id_to_load)
                     st.rerun()
                 else:
                     st.error("Could not load selected deal.")
 
         with c_del:
-            confirm_delete = st.checkbox("Confirm", key="confirm_delete_deal") if selected_deal_id else False
-            if st.button("🗑️ Del") and selected_deal_id:
-                if confirm_delete:
-                    DatabaseManager.delete_deal(selected_deal_id)
-                    st.success("Wiped.")
-                    st.rerun()
-                else:
-                    st.warning("Check Confirm before deleting this deal.")
+            if st.button("🗑️ Del") and selected != "-- Start New Deal --":
+                deal_id_to_del = all_deals.loc[all_deals["name"] == selected, "id"].values[0]
+                DatabaseManager.delete_deal(deal_id_to_del)
+                st.success("Wiped.")
+                st.rerun()
 
         with c_dup:
             if st.button("📑 Dup."):
                 st.session_state.deal_id = f"deal_{int(datetime.now().timestamp())}_{uuid.uuid4().hex[:6]}"
-                st.session_state["last_saved_signature"] = ""
                 st.warning("Duplicated in memory. Save to persist.")
 
     st.markdown("---")
@@ -1195,17 +1083,13 @@ with st.sidebar:
         s.sponsor = st.text_input("Sponsor", value=s.get("sponsor", ""))
         s.property_address = st.text_input("Address", value=s.get("property_address", ""))
 
-        transaction_types = ["Acquisition", "Refinance", "Construction", "Bridge", "Renewal"]
-        tx_idx = transaction_types.index(s.get("transaction_type", "Acquisition")) if s.get("transaction_type") in transaction_types else 0
-        s.transaction_type = st.selectbox("Transaction Type", transaction_types, index=tx_idx)
-
         property_types = ["Multifamily", "Industrial", "Retail", "Office"]
         prop_idx = property_types.index(s.get("property_type", "Multifamily")) if s.get("property_type") in property_types else 0
         s.property_type = st.selectbox("Type", property_types, index=prop_idx)
 
         s.appraisal = st.number_input("Appraisal ($)", value=safe_float(s.get("appraisal")), step=100000.0, min_value=0.0)
         s.purchase_price = st.number_input("Cost Basis ($)", value=safe_float(s.get("purchase_price")), step=100000.0, min_value=0.0)
-        s.noi = st.number_input("Stabilized NOI ($)", value=max(0.0, safe_float(s.get("noi"))), step=10000.0, min_value=0.0)
+        s.noi = st.number_input("Stabilized NOI ($)", value=safe_float(s.get("noi")), step=10000.0)
 
     with st.expander("📊 CREDIT POLICY", expanded=True):
         profiles = list(UnderwritingEngine.LENDER_PROFILES.keys())
@@ -1213,9 +1097,9 @@ with st.sidebar:
         s.lender_profile = st.selectbox("Policy Preset", profiles, index=profile_idx)
 
         preset = UnderwritingEngine.LENDER_PROFILES[s.lender_profile]
-        s.target_ltv = st.slider("Max LTV %", 50.0, 95.0, float(normalize_percent(s.get("target_ltv"), preset["max_ltv"]) * 100), step=0.5) / 100
-        s.target_dscr = st.slider("Min DSCR x", 1.0, 1.75, float(safe_float(s.get("target_dscr"), preset["min_dscr"])), step=0.05)
-        s.target_dy = st.slider("Min DY %", 5.0, 15.0, float(normalize_percent(s.get("target_dy"), preset["min_dy"]) * 100), step=0.25) / 100
+        s.target_ltv = st.slider("Max LTV %", 50.0, 95.0, float(preset["max_ltv"] * 100), step=0.5) / 100
+        s.target_dscr = st.slider("Min DSCR x", 1.0, 1.75, float(preset["min_dscr"]), step=0.05)
+        s.target_dy = st.slider("Min DY %", 5.0, 15.0, float(preset["min_dy"] * 100), step=0.25) / 100
         s.target_ltc = st.slider("Max LTC %", 50.0, 100.0, float(normalize_percent(s.get("target_ltc"), 0.80) * 100), step=0.5) / 100
 
     with st.expander("💰 DEBT STRUCTURE", expanded=True):
@@ -1227,33 +1111,9 @@ with st.sidebar:
         s.closing_costs = st.number_input("Closing Costs", value=safe_float(s.get("closing_costs")), step=1000.0, min_value=0.0)
         s.reserves = st.number_input("Reserves", value=safe_float(s.get("reserves")), step=1000.0, min_value=0.0)
 
-    st.markdown("---")
-    current_sidebar_signature = state_signature()
-    has_unsaved_changes = bool(st.session_state.get("last_saved_signature")) and current_sidebar_signature != st.session_state.get("last_saved_signature")
-    if not st.session_state.get("last_saved_signature"):
-        has_unsaved_changes = True
 
-    if has_unsaved_changes:
-        st.warning("⚠️ Unsaved changes — save before closing or switching deals.")
-    else:
-        st.caption("Saved state is current.")
-
-    if st.button("💾 Save Current Deal", use_container_width=True):
-        clean_state = extract_clean_state()
-        name_parts = [clean_state.get("sponsor") or "Untitled Sponsor", clean_state.get("property_type") or "Asset"]
-        DatabaseManager.save_deal(s.deal_id, " - ".join(name_parts), clean_state)
-        st.session_state["last_saved_signature"] = state_signature(clean_state)
-        st.success("Deal saved.")
-
-
-# ==========================================
-# 10. EXECUTE MATH & ENGINE VALIDATION
-# ==========================================
 s = st.session_state
-if s.get("rent_roll_dict"):
-    s.rent_roll_dict = normalize_rent_roll_columns(pd.DataFrame(s.get("rent_roll_dict", []))).to_dict("records")
-else:
-    s.rent_roll_dict = []
+s.rent_roll_dict = normalize_rent_roll_columns(pd.DataFrame(s.get("rent_roll_dict", []))).to_dict("records")
 
 loan_amt, gate, gates, total_uses, req_equity = UnderwritingEngine.size_loan(
     s.noi, s.appraisal, s.purchase_price, s.closing_costs, s.reserves, s.fees,
@@ -1282,30 +1142,23 @@ risk_flags = RiskAnalysisEngine.generate_narrative(
 )
 
 
-# ==========================================
-# 11. MAIN DASHBOARD HUD
-# ==========================================
 headline_sponsor = s.sponsor or "New Deal"
 headline_property = s.property_address or "Property Address Pending"
 
 st.title(f"{headline_sponsor} | {headline_property}")
 st.caption(f"INSTITUTIONAL WORKSTATION | ACTIVE CONSTRAINT: {gate} | TIER: {classification.upper()}")
 
-m1, m2, m3 = st.columns(3)
-m4, m5, m6 = st.columns(3)
-m1.metric("MAX PROCEEDS", f"${loan_amt:,.0f}", delta=f"{gate} constrained")
-m2.metric("ACTUAL LTV", f"{actual_ltv * 100:.1f}%", delta=f"{(s.target_ltv - actual_ltv) * 100:+.1f}% cushion")
-m3.metric("ACTUAL LTC", f"{actual_ltc * 100:.1f}%", delta=f"{(s.target_ltc - actual_ltc) * 100:+.1f}% cushion")
-m4.metric("ACTUAL DSCR", f"{actual_dscr:.2f}x", delta=f"{actual_dscr - s.target_dscr:+.2f}x vs min")
-m5.metric("BALLOON", f"${balloon:,.0f}", delta=f"{s.term} yr term")
-m6.metric("DEAL SCORE", f"{score}/1000", delta=classification.split("|")[0].strip())
+m1, m2, m3, m4, m5, m6 = st.columns(6)
+m1.metric("MAX PROCEEDS", f"${loan_amt:,.0f}")
+m2.metric("ACTUAL LTV", f"{actual_ltv * 100:.1f}%")
+m3.metric("ACTUAL LTC", f"{actual_ltc * 100:.1f}%")
+m4.metric("ACTUAL DSCR", f"{actual_dscr:.2f}x")
+m5.metric("BALLOON", f"${balloon:,.0f}")
+m6.metric("DEAL SCORE", f"{score}/1000")
 
 st.markdown("---")
 
 
-# ==========================================
-# 12. WORKFLOW TABS
-# ==========================================
 tabs = st.tabs([
     "📊 Sizing & Risk",
     "📝 Rent Roll",
@@ -1318,11 +1171,7 @@ tabs = st.tabs([
 ])
 
 
-# TAB 1: SIZING & RISK
 with tabs[0]:
-    if not s.rent_roll_dict:
-        st.info("Tip: populate the Rent Roll tab first for the most accurate WALT, occupancy, and rollover metrics.")
-
     c1, c2 = st.columns([1.5, 1], gap="large")
 
     with c1:
@@ -1343,7 +1192,7 @@ with tabs[0]:
             ],
             "Binding": ["✅ YES" if gate == k else "" for k in ["LTV", "LTC", "DSCR", "Debt Yield"]],
         })
-        st.dataframe(df_gates, hide_index=True, use_container_width=True)
+        st.table(df_gates)
 
         st.subheader("Sources & Uses")
         df_su = pd.DataFrame({
@@ -1361,28 +1210,14 @@ with tabs[0]:
     with c2:
         st.subheader("Executive Risk Narrative")
         for flag in risk_flags:
-            if "⚠" in flag or "🚨" in flag:
+            if "⚠️" in flag or "🚨" in flag:
                 st.warning(flag)
             else:
                 st.info(flag)
 
 
-# TAB 2: RENT ROLL
 with tabs[1]:
     st.subheader("Interactive Rent Roll")
-    st.caption("On iPad: tap Browse to select a file from Files app or iCloud Drive.")
-
-    rr_btn_add, rr_btn_clear = st.columns(2)
-    with rr_btn_add:
-        if st.button("➕ Add Blank Row", use_container_width=True):
-            current_rr = normalize_rent_roll_columns(pd.DataFrame(s.get("rent_roll_dict", [])))
-            blank = pd.DataFrame([{"Tenant": "", "SF": 0, "Remaining Term": 0, "Monthly Rent": 0}])
-            s.rent_roll_dict = pd.concat([current_rr, blank], ignore_index=True).to_dict("records")
-            st.rerun()
-    with rr_btn_clear:
-        if st.button("🧹 Clear Rent Roll", use_container_width=True):
-            s.rent_roll_dict = []
-            st.rerun()
 
     rr_upload = st.file_uploader(
         "Auto-import Rent Roll CSV or Excel",
@@ -1392,25 +1227,10 @@ with tabs[1]:
 
     if rr_upload:
         try:
-            try:
-                rr_upload.seek(0)
-            except Exception:
-                pass
-
-            lower_name = rr_upload.name.lower()
-            if lower_name.endswith(".csv"):
+            if rr_upload.name.lower().endswith(".csv"):
                 imported_rr = pd.read_csv(rr_upload)
-            elif lower_name.endswith(".xls"):
-                if not XLRD_AVAILABLE:
-                    st.error(".xls import requires the xlrd package. Add xlrd to requirements.txt or upload .xlsx/.csv instead.")
-                    imported_rr = None
-                else:
-                    imported_rr = pd.read_excel(rr_upload, engine="xlrd")
             else:
                 imported_rr = pd.read_excel(rr_upload)
-
-            if imported_rr is None:
-                st.stop()
 
             imported_rr = normalize_rent_roll_columns(imported_rr)
             st.write("Preview")
@@ -1418,7 +1238,6 @@ with tabs[1]:
 
             if st.button("Apply Imported Rent Roll"):
                 s.rent_roll_dict = imported_rr.to_dict("records")
-                st.session_state["last_saved_signature"] = ""
                 DatabaseManager.log_audit("RENT_ROLL_IMPORT", f"Imported rent roll: {rr_upload.name}")
                 st.success("Rent roll imported.")
                 st.rerun()
@@ -1453,7 +1272,6 @@ with tabs[1]:
     r6.metric("12-Mo Rollover", f"{exp1 * 100:.1f}%")
 
 
-# TAB 3: AMORTIZATION
 with tabs[2]:
     st.subheader(f"Amortization Schedule: {s.term} Year Term")
 
@@ -1509,15 +1327,13 @@ with tabs[2]:
         )
 
 
-# TAB 4: MARKET COMPS
 with tabs[3]:
     st.subheader("Simulated Market Comparables")
-    st.caption("Auto-generated based on Property Type and NOI. Replace with verified broker/valuation comps before committee.")
+    st.caption("Comparison set based on property type and NOI. Replace with verified broker/valuation comps before committee.")
     comps_df = MarketCompsEngine.generate_comps(s.property_type, s.noi)
     st.dataframe(comps_df, hide_index=True, use_container_width=True)
 
 
-# TAB 5: DILIGENCE ROOM & GAP ANALYSIS
 with tabs[4]:
     st.subheader("Diligence Vault & Gap Analysis")
     REQUIRED_DOCS = ["Appraisal", "Phase I ESA", "T12 Financials", "Rent Roll", "Sponsor Bio", "Purchase Agreement"]
@@ -1546,17 +1362,8 @@ with tabs[4]:
     with d2:
         st.write("### Package Gap Analysis")
         uploaded_cats = docs["category"].tolist() if not docs.empty and "category" in docs.columns else []
-        priority_map = {
-            "Appraisal": "Required for Submission",
-            "T12 Financials": "Required for Submission",
-            "Rent Roll": "Required for Submission",
-            "Purchase Agreement": "Required for Closing",
-            "Phase I ESA": "Recommended",
-            "Sponsor Bio": "Recommended",
-        }
         gap_df = pd.DataFrame({
             "Requirement": REQUIRED_DOCS,
-            "Priority": [priority_map.get(c, "Recommended") for c in REQUIRED_DOCS],
             "Status": ["✅ Uploaded" if c in uploaded_cats else "❌ Missing" for c in REQUIRED_DOCS],
         })
         st.dataframe(gap_df, hide_index=True, use_container_width=True)
@@ -1564,25 +1371,18 @@ with tabs[4]:
     st.write("### Vault Inventory")
     if not docs.empty:
         st.dataframe(docs[["filename", "category", "uploaded_at"]], use_container_width=True, hide_index=True)
-        doc_lookup = {}
-        doc_options = ["-- None --"]
-        for _, row in docs.iterrows():
-            label = f"{row.get('filename', 'Document')} | {str(row.get('id', ''))[-8:]}"
-            doc_lookup[label] = row.get("id")
-            doc_options.append(label)
-
-        doc_to_delete = st.selectbox("Select Document to Delete", doc_options)
-        if st.button("🗑️ Delete Selected Document") and doc_lookup.get(doc_to_delete):
-            DatabaseManager.delete_document(doc_lookup[doc_to_delete])
+        doc_to_delete = st.selectbox("Select Document to Delete", ["-- None --"] + docs["filename"].tolist())
+        if st.button("🗑️ Delete Selected Document") and doc_to_delete != "-- None --":
+            doc_id_to_del = docs.loc[docs["filename"] == doc_to_delete, "id"].values[0]
+            DatabaseManager.delete_document(doc_id_to_del)
             st.success("Document deleted.")
             st.rerun()
     else:
         st.info("No documents uploaded yet.")
 
 
-# TAB 6: OCR EXTRACT
 with tabs[5]:
-    st.subheader("AI Financial Extraction")
+    st.subheader("Financial Document Extraction")
 
     if not OCR_AVAILABLE:
         st.warning("OCR dependencies not found. Install pytesseract, pillow, and pymupdf to enable extraction.")
@@ -1604,32 +1404,13 @@ with tabs[5]:
             with st.expander("Raw Extracted Text"):
                 st.text_area("OCR Text", text[:10000], height=250)
 
-            preview_rows = []
-            ocr_mapping = {
-                "Stabilized NOI": "noi",
-                "Purchase Price / Cost Basis": "purchase_price",
-                "Appraised Value": "appraisal",
-            }
-            for source_field, state_field in ocr_mapping.items():
-                if source_field in extracted:
-                    preview_rows.append({
-                        "Field": state_field,
-                        "Current": safe_float(s.get(state_field)),
-                        "Extracted": safe_float(extracted[source_field].get("value")),
-                        "Confidence": extracted[source_field].get("confidence"),
-                    })
-            if preview_rows:
-                st.write("### Before / After Preview")
-                st.dataframe(pd.DataFrame(preview_rows), hide_index=True, use_container_width=True)
-
             if st.button("Apply Parameters to Underwriting Model"):
                 if "Stabilized NOI" in extracted:
-                    s.noi = safe_float(extracted["Stabilized NOI"].get("value"), s.noi)
+                    s.noi = extracted["Stabilized NOI"]["value"]
                 if "Purchase Price / Cost Basis" in extracted:
-                    s.purchase_price = safe_float(extracted["Purchase Price / Cost Basis"].get("value"), s.purchase_price)
+                    s.purchase_price = extracted["Purchase Price / Cost Basis"]["value"]
                 if "Appraised Value" in extracted:
-                    s.appraisal = safe_float(extracted["Appraised Value"].get("value"), s.appraisal)
-                st.session_state["last_saved_signature"] = ""
+                    s.appraisal = extracted["Appraised Value"]["value"]
                 DatabaseManager.log_audit("OCR_APPLY", "Applied extracted parameters")
                 st.success("Model updated.")
                 st.rerun()
@@ -1637,52 +1418,28 @@ with tabs[5]:
             st.warning("Could not identify high-confidence parameters.")
 
 
-# TAB 7: CANADA INTEL
 with tabs[6]:
     st.subheader("🇨🇦 Sovereign Intelligence")
     ca1, ca2 = st.columns(2)
 
     with ca1:
         st.write("### Live Bank of Canada Rates")
-        st.caption("FX pairs, overnight money-market rates, and Government of Canada benchmark yields from the Bank of Canada Valet API.")
         boc = CanadianIntel.get_boc_rates()
 
         if boc and not boc.get("error"):
-            dates = boc.get("dates", {}) or {}
-
-            fx1, fx2 = st.columns(2)
-            fx1.metric("USD → CAD", f"{boc['usd_cad']:.4f}" if boc.get("usd_cad") is not None else "N/A")
-            fx2.metric("EUR → CAD", f"{boc['eur_cad']:.4f}" if boc.get("eur_cad") is not None else "N/A")
-
-            r1, r2 = st.columns(2)
-            r1.metric("Overnight Rate", f"{boc['overnight_rate']:.2f}%" if boc.get("overnight_rate") is not None else "N/A")
-            r2.metric("Overnight Target", f"{boc['overnight_target']:.2f}%" if boc.get("overnight_target") is not None else "N/A")
-
-            y1, y2, y3 = st.columns(3)
-            y1.metric("Canada 2Y", f"{boc['2yr_bond']:.2f}%" if boc.get("2yr_bond") is not None else "N/A")
-            y2.metric("Canada 5Y", f"{boc['5yr_bond']:.2f}%" if boc.get("5yr_bond") is not None else "N/A")
-            y3.metric("Canada 10Y", f"{boc['10yr_bond']:.2f}%" if boc.get("10yr_bond") is not None else "N/A")
-
-            rate_rows = [
-                {"Series": "USD/CAD", "Value": boc.get("usd_cad"), "Date": dates.get("usd_cad_date")},
-                {"Series": "EUR/CAD", "Value": boc.get("eur_cad"), "Date": dates.get("eur_cad_date")},
-                {"Series": "Overnight Rate", "Value": boc.get("overnight_rate"), "Date": dates.get("overnight_rate_date")},
-                {"Series": "Overnight Target", "Value": boc.get("overnight_target"), "Date": dates.get("overnight_target_date")},
-                {"Series": "Canada 2Y Yield", "Value": boc.get("2yr_bond"), "Date": dates.get("2yr_bond_date")},
-                {"Series": "Canada 5Y Yield", "Value": boc.get("5yr_bond"), "Date": dates.get("5yr_bond_date")},
-                {"Series": "Canada 10Y Yield", "Value": boc.get("10yr_bond"), "Date": dates.get("10yr_bond_date")},
-            ]
-            rate_df = pd.DataFrame(rate_rows)
-            st.dataframe(
-                rate_df.style.format({"Value": lambda x: "N/A" if pd.isna(x) else f"{x:,.4f}"}),
-                hide_index=True,
-                use_container_width=True,
-            )
-            st.caption(f"Latest available observation across series: {boc.get('date') or 'N/A'}")
+            if boc.get("5yr_bond") is not None:
+                st.metric("5-Year Canada Yield", f"{boc['5yr_bond']:.2f}%")
+            if boc.get("2yr_bond") is not None:
+                st.metric("2-Year Canada Yield", f"{boc['2yr_bond']:.2f}%")
+            if boc.get("10yr_bond") is not None:
+                st.metric("10-Year Canada Yield", f"{boc['10yr_bond']:.2f}%")
+            if boc.get("usd_cad") is not None:
+                st.metric("USD/CAD", f"{boc['usd_cad']:.4f}")
+            st.caption(f"Last Updated: {boc.get('date')}")
         else:
-            st.info("Bank of Canada API currently unavailable.")
+            st.info("Bank of Canada data is currently unavailable.")
             if boc and boc.get("error"):
-                with st.expander("Technical detail"):
+                with st.expander("Connection detail"):
                     st.code(boc.get("error"))
 
     with ca2:
@@ -1710,7 +1467,6 @@ with tabs[6]:
                 st.warning("Could not verify via NRCan / Geo.ca.")
 
 
-# TAB 8: EXPORT & SAVE
 with tabs[7]:
     st.subheader("Save & Package Export")
     c1, c2, c3 = st.columns(3)
@@ -1720,7 +1476,6 @@ with tabs[7]:
             clean_state = extract_clean_state()
             name_parts = [clean_state.get("sponsor") or "Untitled Sponsor", clean_state.get("property_type") or "Asset"]
             DatabaseManager.save_deal(s.deal_id, " - ".join(name_parts), clean_state)
-            st.session_state["last_saved_signature"] = state_signature(clean_state)
             st.success("Deal permanently saved to SQLite.")
 
     clean_state = extract_clean_state()
@@ -1785,11 +1540,9 @@ with tabs[7]:
             st.error(f"Package export failed: {e}")
 
 
-# Footer Disclaimers
 st.markdown("---")
 st.caption(
     "⚠️ **DISCLAIMER:** ALENZA CAPITAL OS is an indicative modeling tool. Outputs do not constitute "
     "a loan commitment, appraisal, or legal advice. Final terms are subject to formal credit committee "
     "approval and third-party diligence verification."
 )
-
