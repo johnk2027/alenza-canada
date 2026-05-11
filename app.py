@@ -1072,63 +1072,84 @@ with st.sidebar:
     st.title("🏛️ ALENZA OS")
 
     with st.expander("📁 PIPELINE MANAGER", expanded=True):
-        new_deal_name = st.text_input("Name New Deal", value=st.session_state.get("deal_name", "Untitled Deal"))
-        if st.button("➕ Start New Deal", use_container_width=True):
+        if "new_deal_name_input" not in st.session_state:
+            st.session_state.new_deal_name_input = "Untitled Deal"
+
+        new_deal_name = st.text_input("Name New Deal", key="new_deal_name_input")
+        if st.button("➕ Start New Deal", use_container_width=True, key="start_new_deal_btn"):
             reset_to_new_deal(new_deal_name)
 
         st.markdown("---")
         all_deals = DatabaseManager.get_all_deals()
 
-        deal_lookup = {}
-        deal_options = []
+        deal_label_by_id = {}
+        deal_ids = []
         if not all_deals.empty:
             for _, row in all_deals.iterrows():
-                short_id = str(row["id"])[-8:]
-                updated = pd.to_datetime(row["updated_at"], errors="coerce")
+                deal_id = str(row["id"])
+                name = str(row.get("name", "Untitled Deal") or "Untitled Deal")
+                short_id = deal_id[-8:]
+                updated = pd.to_datetime(row.get("updated_at"), errors="coerce")
                 updated_label = updated.strftime("%Y-%m-%d %H:%M") if pd.notna(updated) else "no date"
-                label = f"{row['name']} · {updated_label} · {short_id}"
-                deal_options.append(label)
-                deal_lookup[label] = row["id"]
+                deal_label_by_id[deal_id] = f"{name} · {updated_label} · {short_id}"
+                deal_ids.append(deal_id)
 
-        selected = st.selectbox(
-            "Existing Deal to Load",
-            deal_options if deal_options else ["No saved deals yet"],
-            disabled=not bool(deal_options),
-        )
-        selected_deal_id = deal_lookup.get(selected)
+        if deal_ids:
+            selected_deal_id = st.selectbox(
+                "Existing Deal to Load",
+                deal_ids,
+                format_func=lambda x: deal_label_by_id.get(str(x), str(x)),
+                key="selected_deal_id",
+            )
+        else:
+            st.selectbox(
+                "Existing Deal to Load",
+                ["No saved deals yet"],
+                disabled=True,
+                key="selected_deal_empty",
+            )
+            selected_deal_id = None
 
         c_load, c_dup = st.columns(2)
         c_del, c_save = st.columns(2)
 
         with c_load:
-            if st.button("📂 Load", disabled=not bool(selected_deal_id)) and selected_deal_id:
+            if st.button("📂 Load", disabled=selected_deal_id is None, key="load_deal_btn"):
                 loaded_state = DatabaseManager.load_deal(selected_deal_id)
                 if loaded_state:
-                    loaded_state = normalize_loaded_state(loaded_state)
                     for k, v in loaded_state.items():
                         st.session_state[k] = v
                     st.session_state.deal_id = loaded_state.get("deal_id", selected_deal_id)
                     st.session_state.unsaved_changes = False
+                    st.success("Loaded.")
                     st.rerun()
                 else:
                     st.error("Could not load selected deal.")
 
         with c_dup:
-            if st.button("📑 Dup.", disabled=not bool(selected_deal_id)) and selected_deal_id:
+            if st.button("📑 Dup.", disabled=selected_deal_id is None, key="duplicate_deal_btn"):
                 loaded_state = DatabaseManager.load_deal(selected_deal_id)
                 if loaded_state:
-                    loaded_state = normalize_loaded_state(loaded_state)
                     for k, v in loaded_state.items():
                         st.session_state[k] = v
-                st.session_state.deal_id = f"deal_{int(datetime.now().timestamp())}_{uuid.uuid4().hex[:8]}"
-                st.session_state.deal_name = f"Copy of {st.session_state.get('deal_name', 'Untitled Deal')}"
-                st.session_state.unsaved_changes = True
-                st.rerun()
+                    source_name = loaded_state.get("deal_name") or deal_label_by_id.get(str(selected_deal_id), "Untitled Deal").split(" · ")[0]
+                    st.session_state.deal_id = f"deal_{int(datetime.now().timestamp())}_{uuid.uuid4().hex[:8]}"
+                    st.session_state.deal_name = f"Copy of {source_name}"
+                    st.session_state.unsaved_changes = True
+                    st.success("Duplicated. Click Save to store the copy.")
+                    st.rerun()
+                else:
+                    st.error("Could not duplicate selected deal.")
 
-        confirm_delete = st.checkbox("Confirm delete selected deal", value=False, disabled=not bool(selected_deal_id))
+        confirm_delete = st.checkbox(
+            "Confirm delete selected deal",
+            value=False,
+            disabled=selected_deal_id is None,
+            key="confirm_delete_deal",
+        )
 
         with c_del:
-            if st.button("🗑️ Del", disabled=not bool(selected_deal_id)) and selected_deal_id:
+            if st.button("🗑️ Del", disabled=selected_deal_id is None, key="delete_deal_btn"):
                 if confirm_delete:
                     DatabaseManager.delete_deal(selected_deal_id)
                     st.success("Deal deleted.")
@@ -1137,7 +1158,7 @@ with st.sidebar:
                     st.warning("Check confirm before deleting.")
 
         with c_save:
-            if st.button("💾 Save", use_container_width=True):
+            if st.button("💾 Save", use_container_width=True, key="sidebar_save_deal_btn"):
                 clean_state = extract_clean_state()
                 clean_state["last_saved_at"] = datetime.now().isoformat(timespec="seconds")
                 st.session_state.last_saved_at = clean_state["last_saved_at"]
@@ -1145,10 +1166,13 @@ with st.sidebar:
                 DatabaseManager.save_deal(st.session_state.deal_id, deal_title, clean_state)
                 st.session_state.unsaved_changes = False
                 st.success("Saved.")
+                st.rerun()
 
         if st.session_state.get("unsaved_changes"):
             st.warning("Unsaved changes")
+
     st.markdown("---")
+
 
     s = st.session_state
 
@@ -1633,3 +1657,4 @@ st.caption(
     "a loan commitment, appraisal, or legal advice. Final terms are subject to formal credit committee "
     "approval and third-party diligence verification."
 )
+
