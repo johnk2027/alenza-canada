@@ -1,31 +1,62 @@
-# Local database and generated files
-alenza_data/*.db
-alenza_data/*.sqlite
-alenza_data/*.sqlite3
-alenza_data/documents/*
-alenza_data/backups/*
-alenza_data/exports/*
-
-# Keep folders
-!alenza_data/documents/.gitkeep
-!alenza_data/backups/.gitkeep
-!alenza_data/exports/.gitkeep
-
-# Catch accidental root-level databases
-*.db
-*.sqlite
-*.sqlite3
-
-# Secrets
-.streamlit/secrets.toml
+# Environment
 .env
+.env.local
+.env.production
+venv/
+env/
+.venv/
+
+# Application Data
+alenza_data/
+*.db
+*.db-journal
+*.db-wal
+
+# Logs
+*.log
+logs/
 
 # Python
 __pycache__/
 *.py[cod]
-.venv/
-venv/
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Security
+*.pem
+*.key
+*.crt
+secrets/
