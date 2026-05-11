@@ -1,15 +1,36 @@
+Your README is **95% complete and excellent!** Just a few small fixes needed:
+
+## **ISSUES TO FIX:**
+
+### 1. **Badges Section is Broken**
+Lines 7-10 show raw text:
+```
+Version Python License Streamlit
+```
+
+### 2. **Formatting Glitch at Bottom**
+Last line is missing the "B" in "Built" and has stray text.
+
+### 3. **Quick Start Section Formatting**
+The run command is separated from the code block.
+
+---
+
+## **HERE'S THE COMPLETE FIXED README:**
+
+```markdown
 # 🏛️ Alenza Capital OS v3.0.1
 
 **Canadian Commercial Real Estate Debt Underwriting Workstation**
 
+![Version](https://img.shields.io/badge/version-3.0.1-blue)
+![Python](https://img.shields.io/badge/python-3.10%2B-green)
+![Streamlit](https://img.shields.io/badge/streamlit-1.28%2B-red)
+![License](https://img.shields.io/badge/license-MIT-lightgrey)
+
 Alenza Capital OS is a local-first underwriting tool for Canadian CRE mortgage analysis, lender package preparation, and deal triage. It brings together loan sizing, rent-roll review, document-gap checks, federal registry verification, live market-rate context with interactive charts, and exportable reporting in one Streamlit application.
 
 The platform is built around a simple principle: **core underwriting should work without paid APIs, cloud databases, or third-party accounts.**
-
-![Version](https://img.shields.io/badge/version-3.0.1-blue)
-![Python](https://img.shields.io/badge/python-3.10%2B-green)
-![License](https://img.shields.io/badge/license-MIT-lightgrey)
-![Streamlit](https://img.shields.io/badge/streamlit-1.28%2B-red)
 
 ---
 
@@ -150,23 +171,26 @@ Process uploaded PDFs or image files for financial data extraction:
 
 ## 📁 Project Structure
 
+```
 alenza-canada/
-├── app.py # Main application (self-contained)
-├── requirements.txt # Python dependencies
-├── packages.txt # System packages (for Streamlit Cloud)
-├── secrets_template.toml # Template for secrets configuration
-├── README.md # This documentation
-├── .gitignore # Git ignore rules
+├── app.py                    # Main application (self-contained)
+├── requirements.txt          # Python dependencies
+├── packages.txt              # System packages (for Streamlit Cloud)
+├── secrets_template.toml     # Template for secrets configuration
+├── README.md                 # This documentation
+├── .gitignore               # Git ignore rules
 └── .streamlit/
-└── config.toml # Theme and server configuration
+    └── config.toml           # Theme and server configuration
+```
 
 **Auto-generated at runtime:**
-
+```
 alenza_data/
-├── alenza_platform.db # SQLite database
-└── documents/ # Uploaded deal documents
+├── alenza_platform.db        # SQLite database
+└── documents/                # Uploaded deal documents
+```
 
---
+---
 
 ## 🚀 Quick Start
 
@@ -187,84 +211,94 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
+```
 
+### Run Locally
+
+```bash
 streamlit run app.py
+```
 
-The app will open at http://localhost:8501 and automatically create all necessary directories and the database.
+The app will open at `http://localhost:8501` and automatically create all necessary directories and the database.
 
-☁️ Streamlit Cloud Deployment
-Push this repository to GitHub
+---
 
-Go to share.streamlit.io
+## ☁️ Streamlit Cloud Deployment
 
-Deploy with these settings:
+1. Push this repository to GitHub
+2. Go to [share.streamlit.io](https://share.streamlit.io)
+3. Deploy with these settings:
+   - **Repository**: `johnk2027/alenza-canada`
+   - **Branch**: `main`
+   - **Main file path**: `app.py`
+4. The app runs without secrets by default
 
-Repository: johnk2027/alenza-canada
+### Optional Configuration
 
-Branch: main
+Add these to Streamlit Secrets (or `.streamlit/secrets.toml` locally):
 
-Main file path: app.py
-
-The app runs without secrets by default
-
-Optional Configuration
-Add these to Streamlit Secrets (or .streamlit/secrets.toml locally):
-
+```toml
 APP_USER = "Your Name"
 ALENZA_DEAL_INBOX_EMAIL = "resourcefulcapital@gmail.com"
 ALENZA_SECRET_KEY = "your-random-secret-key"
+```
 
+---
 
-🎨 Theme
+## 🎨 Theme
+
 Alenza Capital OS uses a custom dark theme:
 
-Element	Color
-Primary (Accent)	#CFB87C CU Gold
-Background	#0B0F19 Midnight Slate
-Secondary	#0F172A Dark Navy
-Text	#F3F4F6 Light Gray
-👥 Intended Users
+| Element | Color |
+|---------|-------|
+| Primary (Accent) | `#CFB87C` CU Gold |
+| Background | `#0B0F19` Midnight Slate |
+| Secondary | `#0F172A` Dark Navy |
+| Text | `#F3F4F6` Light Gray |
+
+---
+
+## 👥 Intended Users
+
 Alenza is built for:
 
-🇨🇦 Canadian commercial mortgage brokers
+- 🇨🇦 Canadian commercial mortgage brokers
+- 💼 Debt advisors and placement agents
+- 🏦 Private lenders and credit unions
+- 📊 CRE analysts and underwriters
+- 📋 Borrower intake and screening teams
+- 🔍 Acquisition and refinance screening
+- 📁 Lender package preparation
 
-💼 Debt advisors and placement agents
+---
 
-🏦 Private lenders and credit unions
+## ⚠️ Important Notice
 
-📊 CRE analysts and underwriters
+**Alenza Capital OS is an underwriting and workflow tool.** It is not:
 
-📋 Borrower intake and screening teams
-
-🔍 Acquisition and refinance screening
-
-📁 Lender package preparation
-
-⚠️ Important Notice
-Alenza Capital OS is an underwriting and workflow tool. It is not:
-
-❌ A loan commitment or credit approval
-
-❌ An appraisal or valuation
-
-❌ Legal, tax, or investment advice
-
-❌ A replacement for professional due diligence
+- ❌ A loan commitment or credit approval
+- ❌ An appraisal or valuation
+- ❌ Legal, tax, or investment advice
+- ❌ A replacement for professional due diligence
 
 All outputs should be reviewed by qualified professionals before being relied upon for financing, legal, tax, or investment purposes.
 
-📄 License
+---
+
+## 📄 License
+
 MIT License - See LICENSE file for details.
 
-📧 Contact
+---
+
+## 📧 Contact
+
 For broker workflow, partnership, or institutional inquiries:
 
-Email: resourcefulcapital@gmail.com
+- **Email**: [resourcefulcapital@gmail.com](mailto:resourcefulcapital@gmail.com)
+- **GitHub**: [github.com/johnk2027/alenza-canada](https://github.com/johnk2027/alenza-canada)
 
-GitHub: github.com/johnk2027/alenza-canada
+---
 
-uilt for Canadian CRE professionals. No paid APIs required.
-
-text
-
-Save this as `README.md` in your repository. It now documents all your new features including the interactive charts, sensitivity analysis, and enhanced Canada Intel tab!
+**Built for Canadian CRE professionals. No paid APIs required.** 🍁
+```
