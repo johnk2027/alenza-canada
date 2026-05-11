@@ -1,5 +1,5 @@
 """
-Alenza Capital OS v4.4.1
+Alenza Capital OS v4.4.2
 Single-file Streamlit CRE Underwriting Workstation.
 Features strict state contracts, encrypted persistence, and comprehensive institutional export trails.
 """
@@ -76,7 +76,7 @@ if DEPS["crypto"]:
 # =============================================================================
 # 3. CONSTANTS & EXPLICIT STATE CONTRACT
 # =============================================================================
-VERSION = "4.4.1"
+VERSION = "4.4.2"
 MAX_UPLOAD_MB = 50
 DATA_DIR = Path("alenza_data")
 DB_PATH = DATA_DIR / "alenza_platform.db"
@@ -254,6 +254,13 @@ def generate_comps(property_type: str, noi: float, appraisal: float, seed_text: 
 # 7. CACHED FINANCIAL ENGINES
 # =============================================================================
 class UnderwritingEngine:
+    LENDER_PROFILES = {
+        "Bank / Credit Union": {"max_ltv": 0.75, "min_dscr": 1.25, "min_dy": 0.08},
+        "LifeCo / Core": {"max_ltv": 0.65, "min_dscr": 1.35, "min_dy": 0.09},
+        "Bridge / Private": {"max_ltv": 0.85, "min_dscr": 1.00, "min_dy": 0.07},
+        "CMHC Multifamily": {"max_ltv": 0.95, "min_dscr": 1.10, "min_dy": 0.05},
+    }
+
     @staticmethod
     @st.cache_data(show_spinner=False)
     def size_loan(noi: float, appraisal: float, purchase_price: float, closing_costs: float, reserves: float, fees_pct: float, rate: float, amort: int, term: int, is_io: bool, target_ltv: float, target_ltc: float, target_dscr: float, target_dy: float) -> Tuple[float, str, dict, float, float]:
@@ -645,12 +652,8 @@ def fetch_boc_history(days=365) -> Tuple[dict, pd.DataFrame, bool]:
     try:
         r = requests.get(f"https://www.bankofcanada.ca/valet/observations/{','.join(sm.keys())}/json?recent={days}", timeout=8)
         r.raise_for_status()
-        rows = []
-        for o in r.json().get("observations", []):
-            row = {"Date": pd.to_datetime(o.get("d"), errors="coerce")}
-            row.update({l: safe_float(o.get(k, {}).get("v")) for k, l in sm.items()})
-            rows.append(row)
-        df = pd.DataFrame(rows).dropna(subset=["Date"])
+        df = pd.DataFrame([{"Date": pd.to_datetime(o.get("d"), errors="coerce")} | {l: safe_float(o.get(k, {}).get("v")) for k, l in sm.items()} for o in r.json().get("observations", [])])
+        df = df.dropna(subset=["Date"])
         if df.empty: return {}, pd.DataFrame(), True
         return {c: {"val": df[c].dropna().iloc[-1], "date": df["Date"].iloc[-1]} for c in df.columns if c!="Date" and not df[c].dropna().empty}, df, False
     except (requests.RequestException, json.JSONDecodeError): 
@@ -707,7 +710,7 @@ def geocode_address(address: str) -> Optional[dict]:
         if isinstance(payload, list) and payload:
             coords = payload[0].get("geometry", {}).get("coordinates", [])
             if len(coords) >= 2: return {"lon": safe_float(coords[0]), "lat": safe_float(coords[1])}
-    except Exception as e: logger.warning(f"Geocode failed: {e}")
+    except requests.RequestException: pass
     return None
 
 # =============================================================================
@@ -799,6 +802,7 @@ def main():
         except sqlite3.Error: deals = pd.DataFrame()
 
         if not deals.empty:
+            # Deterministic naming for selectbox options
             deal_opts = {f"{r['name']} · {str(r['updated_at'])[:10]} · {r['id'][-8:]}": r["id"] for _, r in deals.iterrows()}
             sd = st.selectbox("Load/Delete Deal", ["-- Select --"] + list(deal_opts.keys()))
             col_l, col_d = st.columns(2)
@@ -866,7 +870,14 @@ def main():
             if out['act_dscr'] < 1.20 and out['L'] > 0: flags.append(("high", f"Tight DSCR: {out['act_dscr']:.2f}x"))
             if out['req_equity'] < 0: flags.append(("medium", f"Cash-out implied: ${abs(out['req_equity']):,.0f} surplus"))
             if not flags: flags.append(("low", "Standard profile. No active flags."))
-            for f in flags: st.error(f[1]) if f[0]=="high" else st.warning(f[1]) if f[0]=="medium" else st.success(f[1])
+            
+            for f in flags:
+                if f[0] == "high":
+                    st.error(f[1])
+                elif f[0] == "medium":
+                    st.warning(f[1])
+                else:
+                    st.success(f[1])
                 
             occ_rr = safe_ratio(UnderwritingEngine.rent_roll_metrics(normalize_rr(pd.DataFrame(s.rent_roll_dict)))[1], 1.0)
             st.metric("Breakeven Occupancy", f"{UnderwritingEngine.breakeven_occupancy(s.noi, max(occ_rr, 0.01), out['c_stack']['FixedCharges']):.1%}")
@@ -950,7 +961,6 @@ def main():
             else: st.success(f"**{tit}**: {txt}")
             
         if latest:
-            st.write("Rate Locking")
             s.rate_lock_enabled = st.toggle("Lock Deal Rate to 5Y GoC", value=s.rate_lock_enabled)
             s.rate_lock_spread_bps = st.number_input("Risk Spread (bps)", 50, 1000, int(s.rate_lock_spread_bps), 5)
             if s.rate_lock_enabled:
