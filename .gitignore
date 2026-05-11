@@ -11,13 +11,18 @@ alenza_data/exports/*
 !alenza_data/backups/.gitkeep
 !alenza_data/exports/.gitkeep
 
+# Catch accidental root-level databases
+*.db
+*.sqlite
+*.sqlite3
+
 # Secrets
 .streamlit/secrets.toml
 .env
 
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
 .venv/
 venv/
 
