@@ -172,6 +172,152 @@ def clean_currency_string(value: str) -> float:
         return safe_float(value.replace('$', '').replace(',', '').strip())
     return 0.0
 
+def hash_state(state: Dict) -> str:
+    """Create SHA-256 hash of state for change detection"""
+    state_str = json.dumps(state, sort_keys=True, default=str)
+    return hashlib.sha256(state_str.encode()).hexdigest()
+
+def sanitize_filename(filename: str) -> str:
+    """Sanitize filename to prevent path traversal"""
+    # Get name and extension
+    path = Path(str(filename))
+    name = path.stem or "file"
+    ext = path.suffix[:10]  # Limit extension length
+    
+    # Remove potentially dangerous characters
+    name = re.sub(r'[^a-zA-Z0-9_.-]', '_', name)
+    name = name[:100]  # Limit length
+    
+    # Add unique suffix to prevent collisions
+    unique_id = uuid.uuid4().hex[:8]
+    
+    return f"{name}_{unique_id}{ext}"
+
+def get_current_user() -> str:
+    """Get current user from environment or session"""
+    try:
+        # Try Streamlit secrets first
+        return str(st.secrets.get("APP_USER", os.environ.get("APP_USER", "Local User")))
+    except:
+        return os.environ.get("APP_USER", "Local User")
+
+def summarize_changes(old_state: dict, new_state: dict) -> str:
+    """Create human-readable change summary for audit log"""
+    tracked_fields = [
+        'deal_name', 'sponsor', 'property_address', 'property_type',
+        'purchase_price', 'appraisal', 'noi', 'rate', 'amort', 'term',
+        'target_ltv', 'target_ltc', 'target_dscr', 'target_dy'
+    ]
+    
+    changes = []
+    for field in tracked_fields:
+        old_val = old_state.get(field) if old_state else None
+        new_val = new_state.get(field) if new_state else None
+        if str(old_val) != str(new_val):
+            changes.append(f"{field}: {old_val} → {new_val}")
+    
+    # Check rent roll changes
+    old_rr_len = len(old_state.get('rent_roll_dict', [])) if old_state else 0
+    new_rr_len = len(new_state.get('rent_roll_dict', [])) if new_state else 0
+    if old_rr_len != new_rr_len:
+        changes.append(f"rent_roll_rows: {old_rr_len} → {new_rr_len}")
+    
+    return "; ".join(changes[:20]) if changes else "No material changes"
+
+# ==========================================
+# ENCRYPTION UTILITIES
+# ==========================================
+
+def encrypt_deal_state(state: dict, secret_key: str) -> str:
+    """
+    Encrypt deal state for secure export.
+    Uses AES-128 via Fernet (cryptography library).
+    
+    Args:
+        state: Deal state dictionary to encrypt
+        secret_key: Password/passphrase for encryption
+        
+    Returns:
+        Base64-encoded encrypted string, or plain JSON if encryption unavailable
+    """
+    try:
+        import base64
+        from cryptography.fernet import Fernet
+        
+        # Derive a 32-byte key from the password using SHA-256
+        key = base64.urlsafe_b64encode(
+            hashlib.sha256(secret_key.encode()).digest()
+        )
+        fernet = Fernet(key)
+        
+        # Convert state to JSON and encrypt
+        state_json = json.dumps(state, default=str)
+        encrypted = fernet.encrypt(state_json.encode())
+        
+        # Return as base64 for safe storage/transmission
+        return base64.b64encode(encrypted).decode()
+        
+    except ImportError:
+        logger.warning("cryptography package not installed. Exporting without encryption.")
+        return json.dumps(state, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Encryption failed: {e}")
+        st.warning(f"Encryption unavailable: {e}")
+        return json.dumps(state, indent=2, default=str)
+
+def decrypt_deal_state(encrypted_state: str, secret_key: str) -> dict:
+    """
+    Decrypt an encrypted deal state.
+    
+    Args:
+        encrypted_state: Base64-encoded encrypted string
+        secret_key: Password/passphrase for decryption
+        
+    Returns:
+        Decrypted deal state dictionary, or empty dict if decryption fails
+    """
+    try:
+        import base64
+        from cryptography.fernet import Fernet
+        
+        # Derive the same key from the password
+        key = base64.urlsafe_b64encode(
+            hashlib.sha256(secret_key.encode()).digest()
+        )
+        fernet = Fernet(key)
+        
+        # Decode from base64 and decrypt
+        encrypted = base64.b64decode(encrypted_state)
+        state_json = fernet.decrypt(encrypted)
+        
+        return json.loads(state_json)
+        
+    except ImportError:
+        logger.warning("cryptography package not installed. Cannot decrypt.")
+        st.error("Encryption package not available. Install with: pip install cryptography")
+        return {}
+    except Exception as e:
+        logger.error(f"Decryption failed: {e}")
+        st.error(f"Decryption failed. Wrong password or corrupted data.")
+        return {}
+
+def is_encrypted_state(data: str) -> bool:
+    """
+    Check if a string is an encrypted deal state.
+    Encrypted data is base64 encoded Fernet output (starts with gAAAAA).
+    """
+    try:
+        import base64
+        decoded = base64.b64decode(data)
+        # Fernet tokens start with version byte 0x80
+        return len(decoded) > 0 and decoded[0] == 0x80
+    except:
+        return False
+
+def hash_file_content(content: bytes) -> str:
+    """Calculate SHA-256 hash of file content for integrity verification"""
+    return hashlib.sha256(content).hexdigest()
+
 # ==========================================
 # ERROR DECORATOR
 # ==========================================
