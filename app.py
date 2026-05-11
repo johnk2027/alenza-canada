@@ -1072,10 +1072,15 @@ with st.sidebar:
     st.title("🏛️ ALENZA OS")
 
     with st.expander("📁 PIPELINE MANAGER", expanded=True):
+        new_deal_name = st.text_input("Name New Deal", value=st.session_state.get("deal_name", "Untitled Deal"))
+        if st.button("➕ Start New Deal", use_container_width=True):
+            reset_to_new_deal(new_deal_name)
+
+        st.markdown("---")
         all_deals = DatabaseManager.get_all_deals()
 
         deal_lookup = {}
-        deal_options = ["-- Start New Deal --"]
+        deal_options = []
         if not all_deals.empty:
             for _, row in all_deals.iterrows():
                 short_id = str(row["id"])[-8:]
@@ -1085,19 +1090,18 @@ with st.sidebar:
                 deal_options.append(label)
                 deal_lookup[label] = row["id"]
 
-        selected = st.selectbox("Select Deal", deal_options)
+        selected = st.selectbox(
+            "Existing Deal to Load",
+            deal_options if deal_options else ["No saved deals yet"],
+            disabled=not bool(deal_options),
+        )
         selected_deal_id = deal_lookup.get(selected)
-        new_deal_name = st.text_input("New Deal Name", value="Untitled Deal")
 
-        c_new, c_load = st.columns(2)
-        c_del, c_dup = st.columns(2)
-
-        with c_new:
-            if st.button("➕ New"):
-                reset_to_new_deal(new_deal_name)
+        c_load, c_dup = st.columns(2)
+        c_del, c_save = st.columns(2)
 
         with c_load:
-            if st.button("📂 Load") and selected_deal_id:
+            if st.button("📂 Load", disabled=not bool(selected_deal_id)) and selected_deal_id:
                 loaded_state = DatabaseManager.load_deal(selected_deal_id)
                 if loaded_state:
                     loaded_state = normalize_loaded_state(loaded_state)
@@ -1109,10 +1113,22 @@ with st.sidebar:
                 else:
                     st.error("Could not load selected deal.")
 
-        confirm_delete = st.checkbox("Confirm delete selected deal", value=False)
+        with c_dup:
+            if st.button("📑 Dup.", disabled=not bool(selected_deal_id)) and selected_deal_id:
+                loaded_state = DatabaseManager.load_deal(selected_deal_id)
+                if loaded_state:
+                    loaded_state = normalize_loaded_state(loaded_state)
+                    for k, v in loaded_state.items():
+                        st.session_state[k] = v
+                st.session_state.deal_id = f"deal_{int(datetime.now().timestamp())}_{uuid.uuid4().hex[:8]}"
+                st.session_state.deal_name = f"Copy of {st.session_state.get('deal_name', 'Untitled Deal')}"
+                st.session_state.unsaved_changes = True
+                st.rerun()
+
+        confirm_delete = st.checkbox("Confirm delete selected deal", value=False, disabled=not bool(selected_deal_id))
 
         with c_del:
-            if st.button("🗑️ Del") and selected_deal_id:
+            if st.button("🗑️ Del", disabled=not bool(selected_deal_id)) and selected_deal_id:
                 if confirm_delete:
                     DatabaseManager.delete_deal(selected_deal_id)
                     st.success("Deal deleted.")
@@ -1120,13 +1136,18 @@ with st.sidebar:
                 else:
                     st.warning("Check confirm before deleting.")
 
-        with c_dup:
-            if st.button("📑 Dup.") and selected_deal_id:
-                st.session_state.deal_id = f"deal_{int(datetime.now().timestamp())}_{uuid.uuid4().hex[:8]}"
-                st.session_state.deal_name = f"Copy of {st.session_state.get('deal_name', 'Untitled Deal')}"
-                st.session_state.unsaved_changes = True
-                st.warning("Duplicated in memory. Save to persist.")
+        with c_save:
+            if st.button("💾 Save", use_container_width=True):
+                clean_state = extract_clean_state()
+                clean_state["last_saved_at"] = datetime.now().isoformat(timespec="seconds")
+                st.session_state.last_saved_at = clean_state["last_saved_at"]
+                deal_title = clean_state.get("deal_name") or clean_state.get("sponsor") or "Untitled Deal"
+                DatabaseManager.save_deal(st.session_state.deal_id, deal_title, clean_state)
+                st.session_state.unsaved_changes = False
+                st.success("Saved.")
 
+        if st.session_state.get("unsaved_changes"):
+            st.warning("Unsaved changes")
     st.markdown("---")
 
     s = st.session_state
@@ -1605,14 +1626,6 @@ with tabs[7]:
         except Exception as e:
             st.error(f"Package export failed: {e}")
 
-
-with st.expander("Deployment Notes"):
-    st.write("SQLite is suitable for local or low-concurrency use. For a shared team deployment, move the persistence layer to PostgreSQL.")
-    st.write("Keep alenza_data/ out of source control. Store API keys in Streamlit secrets or environment variables.")
-    if not OPENPYXL_AVAILABLE:
-        st.warning("openpyxl is not installed. .xlsx rent-roll uploads may fail.")
-    if not XLRD_AVAILABLE:
-        st.info("xlrd is not installed. Legacy .xls rent-roll uploads are disabled until xlrd is added.")
 
 st.markdown("---")
 st.caption(
