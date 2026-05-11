@@ -1,3 +1,7 @@
+# ==========================================
+# ALENZA CAPITAL OS - Requirements
+# ==========================================
+
 # Core dependencies
 streamlit>=1.28.0
 pandas>=2.0.0
@@ -5,19 +9,21 @@ numpy>=1.24.0
 requests>=2.31.0
 
 # Database
-sqlite3-api>=2.0.0
+# NOTE: sqlite3 is built into Python standard library
+# sqlite3-api is NOT a standard package - REMOVED
+# The built-in sqlite3 module is used instead
 
 # Security & Encryption
 cryptography>=41.0.0
 python-dotenv>=1.0.0
 
-# Optional: OCR
-Pillow>=10.0.0
-pytesseract>=0.3.10
-PyMuPDF>=1.23.0
+# Optional: OCR (uncomment if needed)
+# Pillow>=10.0.0
+# pytesseract>=0.3.10
+# PyMuPDF>=1.23.0
 
-# Optional: PDF Export
-reportlab>=4.0.0
+# Optional: PDF Export (uncomment if needed)
+# reportlab>=4.0.0
 
 # Optional: Excel
 xlsxwriter>=3.1.0
@@ -27,10 +33,11 @@ xlrd>=2.0.0
 # Optional: Visualization
 plotly>=5.17.0
 
-# Production Monitoring
-prometheus-client>=0.19.0
-watchdog>=3.0.0
+# Development & Testing (optional for production)
+# pytest>=7.4.0
+# pytest-cov>=4.1.0
 
-# Testing
-pytest>=7.4.0
-pytest-cov>=4.1.0
+# NOTE: prometheus-client and watchdog are NOT needed
+# for a Streamlit app unless you're building custom monitoring
+# prometheus-client>=0.19.0  # REMOVED - overkill for Streamlit
+# watchdog>=3.0.0  # REMOVED - Streamlit has built-in file watching
