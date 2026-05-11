@@ -1,9 +1,11 @@
 streamlit
 pandas
 numpy
-openpyxl
-xlsxwriter
-reportlab
-pillow
+requests
+Pillow
 pytesseract
 PyMuPDF
+reportlab
+xlsxwriter
+openpyxl
+xlrd
