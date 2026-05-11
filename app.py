@@ -1,7 +1,7 @@
 """
-Alenza Capital OS v4.4.2
+Alenza Capital OS v4.4.3
 Single-file Streamlit CRE Underwriting Workstation.
-Features strict state contracts, encrypted persistence, and comprehensive institutional export trails.
+Features strict state contracts, encrypted persistence, live migrations, and contextual OCR.
 """
 
 from __future__ import annotations
@@ -76,7 +76,7 @@ if DEPS["crypto"]:
 # =============================================================================
 # 3. CONSTANTS & EXPLICIT STATE CONTRACT
 # =============================================================================
-VERSION = "4.4.2"
+VERSION = "4.4.3"
 MAX_UPLOAD_MB = 50
 DATA_DIR = Path("alenza_data")
 DB_PATH = DATA_DIR / "alenza_platform.db"
@@ -710,7 +710,7 @@ def geocode_address(address: str) -> Optional[dict]:
         if isinstance(payload, list) and payload:
             coords = payload[0].get("geometry", {}).get("coordinates", [])
             if len(coords) >= 2: return {"lon": safe_float(coords[0]), "lat": safe_float(coords[1])}
-    except requests.RequestException: pass
+    except Exception as e: logger.warning(f"Geocode failed: {e}")
     return None
 
 # =============================================================================
@@ -872,12 +872,9 @@ def main():
             if not flags: flags.append(("low", "Standard profile. No active flags."))
             
             for f in flags:
-                if f[0] == "high":
-                    st.error(f[1])
-                elif f[0] == "medium":
-                    st.warning(f[1])
-                else:
-                    st.success(f[1])
+                if f[0] == "high": st.error(f[1])
+                elif f[0] == "medium": st.warning(f[1])
+                else: st.success(f[1])
                 
             occ_rr = safe_ratio(UnderwritingEngine.rent_roll_metrics(normalize_rr(pd.DataFrame(s.rent_roll_dict)))[1], 1.0)
             st.metric("Breakeven Occupancy", f"{UnderwritingEngine.breakeven_occupancy(s.noi, max(occ_rr, 0.01), out['c_stack']['FixedCharges']):.1%}")
@@ -961,6 +958,7 @@ def main():
             else: st.success(f"**{tit}**: {txt}")
             
         if latest:
+            st.write("Rate Locking")
             s.rate_lock_enabled = st.toggle("Lock Deal Rate to 5Y GoC", value=s.rate_lock_enabled)
             s.rate_lock_spread_bps = st.number_input("Risk Spread (bps)", 50, 1000, int(s.rate_lock_spread_bps), 5)
             if s.rate_lock_enabled:
@@ -982,7 +980,6 @@ def main():
     # TAB 7: Comps
     with tabs[6]:
         st.subheader("[SIMULATED] Market Comparables")
-        st.warning("Data generated programmatically. Not for production credit approval.")
         comps = generate_comps(s.property_type, s.noi, s.appraisal, s.deal_id)
         
         geo = geocode_address(s.property_address) if s.property_address else None
