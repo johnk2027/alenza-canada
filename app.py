@@ -1,7 +1,7 @@
 """
-Alenza Capital OS v4.3.0
+Alenza Capital OS v4.4.1
 Single-file Streamlit CRE Underwriting Workstation.
-Features deterministic hashing, true encrypted payload handling, comprehensive PDF generation, and full vault ZIP exports.
+Features strict state contracts, encrypted persistence, and comprehensive institutional export trails.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ import requests
 import streamlit as st
 
 # =============================================================================
-# 1. STREAMLIT LIFECYCLE
+# 1. STREAMLIT LIFECYCLE (MUST BE FIRST)
 # =============================================================================
 st.set_page_config(page_title="Alenza Capital OS", page_icon="🏢", layout="wide")
 
@@ -76,7 +76,7 @@ if DEPS["crypto"]:
 # =============================================================================
 # 3. CONSTANTS & EXPLICIT STATE CONTRACT
 # =============================================================================
-VERSION = "4.3.0"
+VERSION = "4.4.1"
 MAX_UPLOAD_MB = 50
 DATA_DIR = Path("alenza_data")
 DB_PATH = DATA_DIR / "alenza_platform.db"
@@ -235,7 +235,6 @@ def generate_comps(property_type: str, noi: float, appraisal: float, seed_text: 
     seed_raw = hashlib.sha256(f"{property_type}-{safe_float(noi)}-{safe_float(appraisal)}-{seed_text}".encode()).hexdigest()
     seed = int(seed_raw[:12], 16) % 1_000_000
     rng = np.random.default_rng(seed)
-    
     base_cap = {"Multifamily": 0.045, "Industrial": 0.055, "Retail": 0.065, "Office": 0.075, "Mixed-Use": 0.060, "Hospitality": 0.080, "Self-Storage": 0.058}.get(property_type, 0.06)
     
     rows = []
@@ -255,13 +254,6 @@ def generate_comps(property_type: str, noi: float, appraisal: float, seed_text: 
 # 7. CACHED FINANCIAL ENGINES
 # =============================================================================
 class UnderwritingEngine:
-    LENDER_PROFILES = {
-        "Bank / Credit Union": {"max_ltv": 0.75, "min_dscr": 1.25, "min_dy": 0.08},
-        "LifeCo / Core": {"max_ltv": 0.65, "min_dscr": 1.35, "min_dy": 0.09},
-        "Bridge / Private": {"max_ltv": 0.85, "min_dscr": 1.00, "min_dy": 0.07},
-        "CMHC Multifamily": {"max_ltv": 0.95, "min_dscr": 1.10, "min_dy": 0.05},
-    }
-
     @staticmethod
     @st.cache_data(show_spinner=False)
     def size_loan(noi: float, appraisal: float, purchase_price: float, closing_costs: float, reserves: float, fees_pct: float, rate: float, amort: int, term: int, is_io: bool, target_ltv: float, target_ltc: float, target_dscr: float, target_dy: float) -> Tuple[float, str, dict, float, float]:
@@ -653,8 +645,12 @@ def fetch_boc_history(days=365) -> Tuple[dict, pd.DataFrame, bool]:
     try:
         r = requests.get(f"https://www.bankofcanada.ca/valet/observations/{','.join(sm.keys())}/json?recent={days}", timeout=8)
         r.raise_for_status()
-        df = pd.DataFrame([{"Date": pd.to_datetime(o.get("d"), errors="coerce")} | {l: safe_float(o.get(k, {}).get("v")) for k, l in sm.items()} for o in r.json().get("observations", [])])
-        df = df.dropna(subset=["Date"])
+        rows = []
+        for o in r.json().get("observations", []):
+            row = {"Date": pd.to_datetime(o.get("d"), errors="coerce")}
+            row.update({l: safe_float(o.get(k, {}).get("v")) for k, l in sm.items()})
+            rows.append(row)
+        df = pd.DataFrame(rows).dropna(subset=["Date"])
         if df.empty: return {}, pd.DataFrame(), True
         return {c: {"val": df[c].dropna().iloc[-1], "date": df["Date"].iloc[-1]} for c in df.columns if c!="Date" and not df[c].dropna().empty}, df, False
     except (requests.RequestException, json.JSONDecodeError): 
@@ -715,7 +711,7 @@ def geocode_address(address: str) -> Optional[dict]:
     return None
 
 # =============================================================================
-# 10. EXPORT HELPERS (PDF & ZIP)
+# 10. EXPORT HELPERS (PDF)
 # =============================================================================
 def generate_pdf_memo(s: dict, loan: float, gate: str, ltv: float, dscr: float, req_eq: float, irr: float, c_stack: dict, flags: list, cmt: list, v_err: list, v_warn: list) -> Optional[bytes]:
     if not DEPS["pdf"]: return None
@@ -736,16 +732,17 @@ def generate_pdf_memo(s: dict, loan: float, gate: str, ltv: float, dscr: float, 
         story.append(Spacer(1, 16))
         
         story.append(Paragraph("Capital Stack & Uses", sty["Heading3"]))
-        t2 = Table([["Tranche", "Amount"], ["Senior Debt", f"${c_stack['Senior']:,.0f}"], ["Mezzanine", f"${c_stack['Mezz']:,.0f}"], ["Preferred", f"${c_stack['Pref']:,.0f}"], ["Sponsor Equity", f"${c_stack['Sponsor']:,.0f}"]], colWidths=[200, 150])
+        t2 = Table([["Tranche", "Amount"], ["Purchase Price", f"${s.get('purchase_price',0):,.0f}"], ["Closing Costs", f"${s.get('closing_costs',0):,.0f}"], ["Reserves", f"${s.get('reserves',0):,.0f}"], ["Senior Debt", f"${c_stack['Senior']:,.0f}"], ["Mezzanine", f"${c_stack['Mezz']:,.0f}"], ["Preferred", f"${c_stack['Pref']:,.0f}"], ["Sponsor Equity", f"${c_stack['Sponsor']:,.0f}"]], colWidths=[200, 150])
         t2.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.5, colors.grey)]))
         story.append(t2)
         
-        story.append(Spacer(1, 16))
-        story.append(Paragraph("Validation & Intelligence", sty["Heading3"]))
-        for e in v_err: story.append(Paragraph(f"• ERROR: {e}", s_norm))
-        for w in v_warn: story.append(Paragraph(f"• WARN: {w}", s_norm))
-        for f in flags: story.append(Paragraph(f"• RISK: {f[1]}", s_norm))
-        for c in cmt: story.append(Paragraph(f"• MARKET: {c[1]} - {c[2]}", s_norm))
+        if flags or cmt or v_err or v_warn:
+            story.append(Spacer(1, 16))
+            story.append(Paragraph("Validation, Risk & Market Commentary", sty["Heading3"]))
+            for e in v_err: story.append(Paragraph(f"• ERROR: {e}", s_norm))
+            for w in v_warn: story.append(Paragraph(f"• WARN: {w}", s_norm))
+            for f in flags: story.append(Paragraph(f"• RISK: {f[1]}", s_norm))
+            for c in cmt: story.append(Paragraph(f"• MARKET: {c[1]} - {c[2]}", s_norm))
             
         story.append(Spacer(1, 24))
         story.append(Paragraph("<i>[SIMULATED DATA INCLUDED] This memo is indicative only and not for final credit approval.</i>", s_norm))
@@ -802,7 +799,6 @@ def main():
         except sqlite3.Error: deals = pd.DataFrame()
 
         if not deals.empty:
-            # Deterministic naming for selectbox options
             deal_opts = {f"{r['name']} · {str(r['updated_at'])[:10]} · {r['id'][-8:]}": r["id"] for _, r in deals.iterrows()}
             sd = st.selectbox("Load/Delete Deal", ["-- Select --"] + list(deal_opts.keys()))
             col_l, col_d = st.columns(2)
@@ -913,7 +909,7 @@ def main():
         st.subheader("Amortization & Paydown")
         k1, k2, k3 = st.columns(3)
         k1.metric("Monthly P&I", f"${out['m_pmt']:,.2f}"); k2.metric("Annual DS", f"${out['annual_ds']:,.0f}")
-        k3.metric("Balloon Balance", f"${out['balloon']:,.0f}", delta=f"{safe_ratio(out['balloon'], out['L']):.1%} of orig" if out['L']>0 else None, delta_color="normal")
+        k3.metric("Balloon Balance", f"${out['balloon']:,.0f}")
         if not out['amort_df'].empty and DEPS["plotly"]:
             fig = px.bar(out['amort_df'], x="Period", y=["Principal", "Interest"], color_discrete_sequence=["#CFB87C", "#1E293B"])
             fig.update_layout(template="plotly_dark", paper_bgcolor="#0B0F19", plot_bgcolor="#0F172A", barmode="stack")
@@ -954,6 +950,7 @@ def main():
             else: st.success(f"**{tit}**: {txt}")
             
         if latest:
+            st.write("Rate Locking")
             s.rate_lock_enabled = st.toggle("Lock Deal Rate to 5Y GoC", value=s.rate_lock_enabled)
             s.rate_lock_spread_bps = st.number_input("Risk Spread (bps)", 50, 1000, int(s.rate_lock_spread_bps), 5)
             if s.rate_lock_enabled:
@@ -975,16 +972,15 @@ def main():
     # TAB 7: Comps
     with tabs[6]:
         st.subheader("[SIMULATED] Market Comparables")
+        st.warning("Data generated programmatically. Not for production credit approval.")
         comps = generate_comps(s.property_type, s.noi, s.appraisal, s.deal_id)
         
         geo = geocode_address(s.property_address) if s.property_address else None
         if not geo: st.info("Using Toronto fallback anchor. Provide valid address for precise geocoding.")
         c_lat, c_lon = (geo["lat"], geo["lon"]) if geo else (43.65, -79.38)
         
-        # Deterministic coordinate jitter
-        s_hash = hashlib.sha256(s.deal_id.encode()).hexdigest()
-        comps["lat"] = c_lat + np.random.default_rng(int(s_hash[:8], 16)).uniform(-0.05, 0.05, 5)
-        comps["lon"] = c_lon + np.random.default_rng(int(s_hash[8:16], 16)).uniform(-0.05, 0.05, 5)
+        comps["lat"] = c_lat + np.random.default_rng(int(hashlib.sha256(s.deal_id.encode()).hexdigest()[:8], 16)).uniform(-0.05, 0.05, 5)
+        comps["lon"] = c_lon + np.random.default_rng(int(hashlib.sha256(s.deal_id.encode()).hexdigest()[8:16], 16)).uniform(-0.05, 0.05, 5)
         
         st.dataframe(comps.drop(columns=["lat","lon"]).style.format({"Cap Rate": "{:.2%}", "NOI": "${:,.0f}", "Value": "${:,.0f}"}), hide_index=True, use_container_width=True)
         if DEPS["plotly"]:
@@ -1005,11 +1001,10 @@ def main():
         
         try:
             with DatabaseManager.get_conn() as conn:
-                docs = pd.read_sql_query("SELECT id, filename, category, is_encrypted, size as original_size FROM documents WHERE deal_id=?", conn, params=(s.deal_id,))
+                docs = pd.read_sql_query("SELECT id, filename, category, is_encrypted FROM documents WHERE deal_id=?", conn, params=(s.deal_id,))
             if not docs.empty:
                 st.dataframe(docs, hide_index=True, use_container_width=True)
                 
-                # Download Logic
                 dl_id = st.selectbox("Download Doc", ["-- Select --"] + docs["id"].tolist())
                 if dl_id != "-- Select --":
                     r_doc = conn.execute("SELECT path, is_encrypted, filename FROM documents WHERE id=?", (dl_id,)).fetchone()
@@ -1025,13 +1020,11 @@ def main():
                         if raw_b is not None:
                             st.download_button("Download File", raw_b, r_doc["filename"])
                         
-                # Delete Logic
                 del_id = st.selectbox("Delete Doc", ["-- Select --"] + docs["id"].tolist())
                 del_doc_confirm = st.checkbox("Confirm doc delete")
                 if del_id != "-- Select --" and st.button("Delete Document", disabled=not del_doc_confirm):
                     DatabaseManager.delete_doc(del_id); st.rerun()
                 
-                # Contextual OCR
                 if DEPS["ocr"]:
                     st.write("OCR Context Scanner")
                     sc_id = st.selectbox("Scan Doc", docs["id"].tolist())
@@ -1118,7 +1111,10 @@ def main():
                                 d_bytes = Path(row["path"]).read_bytes()
                                 if bool(row["is_encrypted"]):
                                     k = get_encryption_key()
-                                    if k: d_bytes = decrypt_bytes(d_bytes, k)
+                                    if not k:
+                                        zf.writestr(f"vault/README_{row['filename']}.txt", "Encrypted document omitted because ALENZA_DB_ENCRYPTION_KEY is not available.")
+                                        continue
+                                    d_bytes = decrypt_bytes(d_bytes, k)
                                 zf.writestr(f"vault/{row['filename']}", d_bytes)
                             except Exception: pass
                 except sqlite3.Error: pass
@@ -1150,5 +1146,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-```
