@@ -1,7 +1,7 @@
 """
-Alenza Capital OS v3.9.0
+Alenza Capital OS v4.1.1
 Single-file Streamlit CRE Underwriting Workstation.
-Includes dynamic salted encryption, strict state isolation, degraded API handling, and institutional exports.
+Features strict state contracts, encrypted persistence, and comprehensive export trails.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ import requests
 import streamlit as st
 
 # =============================================================================
-# 1. STREAMLIT LIFECYCLE
+# 1. STREAMLIT LIFECYCLE (MUST BE FIRST)
 # =============================================================================
 st.set_page_config(page_title="Alenza Capital OS", page_icon="🏢", layout="wide")
 
@@ -76,7 +76,7 @@ if DEPS["crypto"]:
 # =============================================================================
 # 3. CONSTANTS & EXPLICIT STATE CONTRACT
 # =============================================================================
-VERSION = "3.9.0"
+VERSION = "4.1.1"
 MAX_UPLOAD_MB = 50
 DATA_DIR = Path("alenza_data")
 DB_PATH = DATA_DIR / "alenza_platform.db"
@@ -103,7 +103,53 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # =============================================================================
-# 4. UTILITIES & DYNAMIC CRYPTOGRAPHY
+# 4. STATE MANAGEMENT
+# =============================================================================
+def default_state() -> dict:
+    return {
+        "deal_id": f"deal_{int(time.time())}_{uuid.uuid4().hex[:6]}",
+        "deal_name": "Untitled Deal",
+        "sponsor": "",
+        "property_address": "",
+        "property_type": "Multifamily",
+        "transaction_type": "Acquisition",
+        "lender_profile": "Bank / Credit Union",
+        "purchase_price": 0.0,
+        "appraisal": 0.0,
+        "noi": 0.0,
+        "rate": 0.055,
+        "amort": 25,
+        "term": 5,
+        "is_io": False,
+        "fees": 0.015,
+        "closing_costs": 0.0,
+        "reserves": 0.0,
+        "target_ltv": 0.75,
+        "target_ltc": 0.80,
+        "target_dscr": 1.25,
+        "target_dy": 0.08,
+        "mezz_debt": 0.0,
+        "pref_equity": 0.0,
+        "mezz_rate": 0.11,
+        "pref_rate": 0.09,
+        "pf_rev_growth": 0.03,
+        "pf_exp_growth": 0.02,
+        "pf_exp_ratio": 0.40,
+        "pf_exit_cap": 0.06,
+        "pf_sell_costs": 0.015,
+        "pf_term_growth": 0.02,
+        "rate_lock_enabled": False,
+        "rate_lock_spread_bps": 250,
+        "rent_roll_dict": DEFAULT_RENT_ROLL.copy(),
+        "diligence_notes": "",
+    }
+
+def get_current_state() -> dict:
+    defaults = default_state()
+    return {key: st.session_state.get(key, defaults.get(key)) for key in DEAL_STATE_KEYS}
+
+# =============================================================================
+# 5. UTILITIES & CRYPTOGRAPHY
 # =============================================================================
 def safe_float(v: Any, default: float = 0.0) -> float:
     if v is None or v == "": return default
@@ -121,24 +167,42 @@ def get_encryption_key() -> Optional[str]:
     try: return st.secrets.get("ALENZA_DB_ENCRYPTION_KEY") or os.environ.get("ALENZA_DB_ENCRYPTION_KEY")
     except Exception: return os.environ.get("ALENZA_DB_ENCRYPTION_KEY")
 
-def encrypt_text(text: str, secret: str) -> str:
+def make_fernet(secret: str, salt: bytes):
     if not DEPS["crypto"]: raise RuntimeError("Cryptography package missing.")
-    salt = os.urandom(16)
     kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=100000)
     key = base64.urlsafe_b64encode(kdf.derive(secret.encode()))
-    token = Fernet(key).encrypt(text.encode())
+    return Fernet(key)
+
+def encrypt_text(text: str, secret: str) -> str:
+    salt = os.urandom(16)
+    token = make_fernet(secret, salt).encrypt(text.encode())
     return base64.b64encode(salt + token).decode()
 
 def decrypt_text(token_b64: str, secret: str) -> str:
-    if not DEPS["crypto"]: raise RuntimeError("Cryptography package missing.")
     raw = base64.b64decode(token_b64.encode())
     salt, token = raw[:16], raw[16:]
-    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=100000)
-    key = base64.urlsafe_b64encode(kdf.derive(secret.encode()))
-    return Fernet(key).decrypt(token).decode()
+    return make_fernet(secret, salt).decrypt(token).decode()
+
+def encrypt_bytes(data: bytes, secret: str) -> bytes:
+    salt = os.urandom(16)
+    token = make_fernet(secret, salt).encrypt(data)
+    return salt + token
+
+def decrypt_bytes(raw: bytes, secret: str) -> bytes:
+    salt, token = raw[:16], raw[16:]
+    return make_fernet(secret, salt).decrypt(token)
+
+def apply_theme():
+    st.markdown("""<style>
+        :root { --g: #CFB87C; --bg: #0B0F19; --fg: #0F172A; }
+        .stApp { background: var(--bg); }
+        [data-testid="stMetric"] { background: var(--fg); border: 1px solid rgba(207,184,124,0.3); padding: 15px; border-radius: 8px; }
+        [data-testid="stMetricValue"] { color: var(--g); }
+        .stTabs [aria-selected="true"] { border-bottom: 2px solid var(--g) !important; color: var(--g) !important; }
+    </style>""", unsafe_allow_html=True)
 
 # =============================================================================
-# 5. DATA NORMALIZERS & GENERATORS
+# 6. DATA NORMALIZERS & GENERATORS
 # =============================================================================
 def normalize_rr(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty: return pd.DataFrame(columns=DEFAULT_RENT_COLS)
@@ -186,9 +250,16 @@ def generate_comps(property_type: str, noi: float, appraisal: float, seed_text: 
     return pd.DataFrame(rows)
 
 # =============================================================================
-# 6. CACHED FINANCIAL ENGINES
+# 7. CACHED FINANCIAL ENGINES
 # =============================================================================
 class UnderwritingEngine:
+    LENDER_PROFILES = {
+        "Bank / Credit Union": {"max_ltv": 0.75, "min_dscr": 1.25, "min_dy": 0.08},
+        "LifeCo / Core": {"max_ltv": 0.65, "min_dscr": 1.35, "min_dy": 0.09},
+        "Bridge / Private": {"max_ltv": 0.85, "min_dscr": 1.00, "min_dy": 0.07},
+        "CMHC Multifamily": {"max_ltv": 0.95, "min_dscr": 1.10, "min_dy": 0.05},
+    }
+
     @staticmethod
     @st.cache_data(show_spinner=False)
     def size_loan(noi: float, appraisal: float, purchase_price: float, closing_costs: float, reserves: float, fees_pct: float, rate: float, amort: int, term: int, is_io: bool, target_ltv: float, target_ltc: float, target_dscr: float, target_dy: float) -> Tuple[float, str, dict, float, float]:
@@ -221,7 +292,6 @@ class UnderwritingEngine:
     def amort_schedule(loan_amt: float, rate: float, amort_yrs: int, term_yrs: int, is_io: bool) -> Tuple[pd.DataFrame, float, float]:
         if loan_amt <= 0: return pd.DataFrame(columns=["Period","Payment","Principal","Interest","Balance"]), 0.0, 0.0
         m_rate = rate / 12
-        # Zero-rate fallback handling
         m_pmt = loan_amt * m_rate if is_io else (loan_amt * m_rate) / (1 - (1 + m_rate)**-(amort_yrs * 12)) if m_rate > 0 else loan_amt / (amort_yrs * 12)
         
         data, bal = [], loan_amt
@@ -254,6 +324,12 @@ class UnderwritingEngine:
         walt = (occ["Remaining Term"] * occ["SF"]).sum() / occ_sf
         exp1 = occ[occ["Remaining Term"] <= 1.0]["SF"].sum() / occ_sf
         return total_sf, occ_sf/total_sf, ar, ar/occ_sf if occ_sf > 0 else 0, walt, exp1
+
+    @staticmethod
+    def breakeven_occupancy(noi: float, occ: float, ann_ds: float) -> float:
+        noi, occ, ann_ds = safe_float(noi), safe_float(occ), safe_float(ann_ds)
+        if noi <= 0 or occ <= 0 or ann_ds <= 0: return 0.0
+        return min(1.5, max(0.0, ann_ds / noi * occ))
 
 class InvestmentEngine:
     @staticmethod
@@ -300,20 +376,23 @@ class SensitivityEngine:
             data.append(row)
         return pd.DataFrame(data)
 
-# =============================================================================
-# 7. VALIDATION & QA ENGINE
-# =============================================================================
 class ValidationEngine:
     @staticmethod
     def validate_deal_state(state: dict, req_eq: float) -> Tuple[List[str], List[str]]:
         e, w = [], []
         if not str(state.get("deal_name")).strip(): e.append("Deal name is required.")
         if safe_float(state.get("purchase_price")) < 0: e.append("Purchase price cannot be negative.")
+        if safe_float(state.get("noi")) < 0: e.append("NOI cannot be negative.")
         if safe_float(state.get("target_ltv")) > 1.25: e.append("Target LTV > 125%")
-        if req_eq < 0: w.append("Cash-out structure detected. Confirm lender permits equity extraction.")
+        if safe_float(state.get("target_dscr")) < 1.0: w.append("Target DSCR < 1.0x implies no cushion.")
         
         cap = safe_ratio(state.get("noi", 0), state.get("appraisal", 0))
         if cap > 0 and cap < 0.02: w.append(f"Implied Cap Rate {cap:.2%} is unusually low.")
+        if cap > 0.20: w.append(f"Implied Cap Rate {cap:.2%} is unusually high.")
+        
+        prem = safe_ratio(state.get("purchase_price", 0), state.get("appraisal", 0))
+        if prem > 1.25: e.append("Purchase price is >25% over appraisal.")
+        elif prem > 1.10: w.append("Purchase price > 10% over appraisal.")
         
         rr = state.get("rent_roll_dict", [])
         if isinstance(rr, list):
@@ -343,7 +422,7 @@ class ValidationEngine:
             L_io, _, gates_io, _, _ = UnderwritingEngine.size_loan(1_000_000, 100_000_000, 100_000_000, 0, 0, 0.0, 0.06, 25, 5, True, 1.0, 1.0, 1.25, 0.01)
             check("Exact IO DSCR Sizing", abs(gates_io["DSCR"] - 13333333.33) < 1, f"${gates_io['DSCR']:,.0f}")
 
-            L_z, _, _, _, _ = UnderwritingEngine.size_loan(0, 10_000_000, 9_000_000, 0, 0, 0.01, 0.06, 25, 5, False, 0.70, 0.80, 1.25, 0.09)
+            L_z, _, _, _, _ = UnderwritingEngine.size_loan(0, 10_000_000, 9_000_000, 100_000, 0, 0.01, 0.06, 25, 5, False, 0.70, 0.80, 1.25, 0.09)
             check("Zero NOI -> Zero Proceeds", L_z == 0, f"${L_z:,.0f}")
 
             _, pmt_zr, _ = UnderwritingEngine.amort_schedule(1_000_000, 0.0, 25, 5, False)
@@ -360,7 +439,7 @@ class ValidationEngine:
 
             if DEPS["crypto"]:
                 pt = "AlenzaTest"
-                key = "YmFzZTY0a2V5" # Dummy
+                key = "YmFzZTY0a2V5" # Dummy for testing
                 check("Round-Trip Crypto", decrypt_text(encrypt_text(pt, key), key) == pt, "PBKDF2HMAC Salted AES")
         except Exception as e:
             check("Test Suite Execution", False, str(e))
@@ -388,7 +467,7 @@ class DatabaseManager:
                 c.executescript("""
                     CREATE TABLE IF NOT EXISTS deals (id TEXT PRIMARY KEY, name TEXT, state_json TEXT, updated_at TIMESTAMP, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
                     CREATE TABLE IF NOT EXISTS deal_versions (id INTEGER PRIMARY KEY AUTOINCREMENT, deal_id TEXT, state_json TEXT, created_at TIMESTAMP, FOREIGN KEY(deal_id) REFERENCES deals(id) ON DELETE CASCADE);
-                    CREATE TABLE IF NOT EXISTS documents (id TEXT PRIMARY KEY, deal_id TEXT, filename TEXT, category TEXT, path TEXT, size INT, uploaded_at TIMESTAMP);
+                    CREATE TABLE IF NOT EXISTS documents (id TEXT PRIMARY KEY, deal_id TEXT, filename TEXT, category TEXT, path TEXT, size INT, is_encrypted BOOLEAN, uploaded_at TIMESTAMP);
                     CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, deal_id TEXT, user TEXT, action TEXT, details TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
                 """)
         except sqlite3.Error as e: logger.error(f"DB Init failed: {e}")
@@ -408,10 +487,13 @@ class DatabaseManager:
     def save_deal(cls, deal_id: str, name: str, state: dict) -> bool:
         clean_state = {k: state.get(k) for k in DEAL_STATE_KEYS}
         key = get_encryption_key()
+        
         try:
-            if key and DEPS["crypto"]: payload = json.dumps({"_alenza_storage": "encrypted", "payload": encrypt_text(json.dumps(clean_state), key)})
-            else: payload = json.dumps({"_alenza_storage": "plain", "payload": json.dumps(clean_state)})
-            
+            if key and DEPS["crypto"]:
+                payload = json.dumps({"_alenza_storage": "encrypted", "payload": encrypt_text(json.dumps(clean_state), key)})
+            else:
+                payload = json.dumps({"_alenza_storage": "plain", "payload": json.dumps(clean_state)})
+                
             now = datetime.now(timezone.utc).isoformat()
             with cls.get_conn() as c:
                 c.execute("BEGIN TRANSACTION")
@@ -420,7 +502,7 @@ class DatabaseManager:
                 c.commit()
             cls.log_audit(deal_id, "SAVE_DEAL", f"Saved: {name}")
             return True
-        except (sqlite3.Error, ValueError, TypeError, RuntimeError) as e:
+        except (sqlite3.Error, ValueError, TypeError) as e:
             logger.error(f"Save failed: {e}")
             return False
 
@@ -430,18 +512,28 @@ class DatabaseManager:
             with cls.get_conn() as c:
                 r = c.execute("SELECT state_json FROM deals WHERE id=?", (deal_id,)).fetchone()
                 if not r: return None
+                
                 raw = json.loads(r["state_json"])
                 if raw.get("_alenza_storage") == "encrypted":
                     key = get_encryption_key()
                     if not key: raise ValueError("Encrypted deal requires ALENZA_DB_ENCRYPTION_KEY")
                     state = json.loads(decrypt_text(raw["payload"], key))
-                elif raw.get("_alenza_storage") == "plain": state = json.loads(raw["payload"])
+                elif raw.get("_alenza_storage") == "plain":
+                    state = json.loads(raw["payload"])
                 else: state = raw
+                
                 cls.log_audit(deal_id, "LOAD_DEAL", "Loaded successfully")
                 return state
-        except (sqlite3.Error, json.JSONDecodeError, ValueError, RuntimeError) as e:
+        except (sqlite3.Error, json.JSONDecodeError, ValueError) as e:
             logger.error(f"Load failed: {e}")
             return None
+
+    @classmethod
+    def get_all_deals(cls):
+        try:
+            with cls.get_conn() as c:
+                return pd.read_sql_query("SELECT id, name, created_at, updated_at FROM deals ORDER BY updated_at DESC", c)
+        except sqlite3.Error: return pd.DataFrame()
 
     @classmethod
     def delete_deal(cls, deal_id: str) -> bool:
@@ -451,35 +543,47 @@ class DatabaseManager:
                 for row in docs:
                     try: Path(row["path"]).unlink(missing_ok=True)
                     except OSError: pass
+                
                 c.execute("DELETE FROM documents WHERE deal_id=?", (deal_id,))
                 c.execute("DELETE FROM deal_versions WHERE deal_id=?", (deal_id,))
-                c.execute("DELETE FROM audit_log WHERE deal_id=?", (deal_id,))
                 c.execute("DELETE FROM deals WHERE id=?", (deal_id,))
                 c.commit()
-            logger.info(f"Deleted deal: {deal_id}")
+            # Note: Do not delete audit logs to maintain immutability
+            cls.log_audit(deal_id, "DELETE_DEAL", f"Deleted deal ID: {deal_id}")
             return True
-        except sqlite3.Error: return False
+        except sqlite3.Error as e:
+            logger.error(f"Delete failed: {e}")
+            return False
 
     @classmethod
     def save_doc(cls, deal_id: str, file, category: str) -> bool:
         content = file.getvalue()
         if len(content) > MAX_UPLOAD_MB * 1024 * 1024: raise ValueError(f"File exceeds {MAX_UPLOAD_MB} MB limit")
+        
         doc_id = f"doc_{int(time.time())}_{uuid.uuid4().hex[:6]}"
         safe_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", file.name)
-        path = (DOC_DIR / f"{doc_id}_{safe_name}").resolve()
+        key = get_encryption_key()
+        is_enc = bool(key and DEPS["crypto"])
         
+        if is_enc:
+            content = encrypt_bytes(content, key)
+            safe_name += ".enc"
+            
+        path = (DOC_DIR / f"{doc_id}_{safe_name}").resolve()
         try: path.relative_to(DOC_DIR.resolve())
         except ValueError: raise ValueError("Unsafe document path rejected")
 
         try:
             path.write_bytes(content)
             with cls.get_conn() as c:
-                c.execute("INSERT INTO documents (id, deal_id, filename, category, path, size, uploaded_at) VALUES (?, ?, ?, ?, ?, ?, ?)", 
-                          (doc_id, deal_id, safe_name, category, str(path), len(content), datetime.now().isoformat()))
+                c.execute("INSERT INTO documents (id, deal_id, filename, category, path, size, is_encrypted, uploaded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
+                          (doc_id, deal_id, safe_name.replace(".enc", ""), category, str(path), len(content), is_enc, datetime.now().isoformat()))
                 c.commit()
             cls.log_audit(deal_id, "DOC_UPLOAD", f"Uploaded {safe_name}")
             return True
-        except (sqlite3.Error, OSError): return False
+        except (sqlite3.Error, OSError) as e:
+            logger.error(f"Doc save failed: {e}")
+            return False
 
     @classmethod
     def delete_doc(cls, doc_id: str) -> bool:
@@ -495,8 +599,37 @@ class DatabaseManager:
             return True
         except sqlite3.Error: return False
 
+    @classmethod
+    def get_versions(cls, deal_id: str) -> pd.DataFrame:
+        try:
+            with cls.get_conn() as c:
+                return pd.read_sql_query("SELECT id, created_at FROM deal_versions WHERE deal_id=? ORDER BY created_at DESC", c, params=(deal_id,))
+        except sqlite3.Error: return pd.DataFrame()
+
+    @classmethod
+    def load_version(cls, version_id: int) -> Optional[dict]:
+        try:
+            with cls.get_conn() as c:
+                r = c.execute("SELECT deal_id, state_json FROM deal_versions WHERE id=?", (version_id,)).fetchone()
+                if not r: return None
+                
+                raw = json.loads(r["state_json"])
+                if raw.get("_alenza_storage") == "encrypted":
+                    key = get_encryption_key()
+                    if not key: raise ValueError("Encrypted deal requires ALENZA_DB_ENCRYPTION_KEY")
+                    state = json.loads(decrypt_text(raw["payload"], key))
+                elif raw.get("_alenza_storage") == "plain":
+                    state = json.loads(raw["payload"])
+                else: state = raw
+                
+                cls.log_audit(r["deal_id"], "RESTORE_VERSION", f"Restored version ID {version_id}")
+                return state
+        except Exception as e:
+            logger.error(f"Version load failed: {e}")
+            return None
+
 # =============================================================================
-# 9. MARKET INTELLIGENCE & APIs (Degraded Mode Enabled)
+# 9. MARKET INTELLIGENCE & APIs (Degraded Mode Aware)
 # =============================================================================
 @st.cache_data(ttl=3600)
 def fetch_boc_history(days=365) -> Tuple[dict, pd.DataFrame, bool]:
@@ -583,7 +716,7 @@ def generate_pdf_memo(s: dict, loan: float, gate: str, ltv: float, dscr: float, 
             for c in cmt: story.append(Paragraph(f"• MARKET: {c[1]} - {c[2]}", s_norm))
             
         story.append(Spacer(1, 24))
-        story.append(Paragraph("<i>[SIMULATED DATA INCLUDED] This memo is indicative only and not for final credit approval. Documents stored unencrypted.</i>", s_norm))
+        story.append(Paragraph("<i>[SIMULATED DATA INCLUDED] This memo is indicative only and not for final credit approval.</i>", s_norm))
         
         doc.build(story)
         b.seek(0)
@@ -614,12 +747,7 @@ def main():
     DatabaseManager.init_db()
 
     if "deal_id" not in st.session_state:
-        st.session_state.update({k: v for k,v in zip(DEAL_STATE_KEYS, [
-            f"deal_{int(time.time())}_{uuid.uuid4().hex[:6]}", "Untitled Deal", "", "", "Multifamily", "Acquisition", "Bank / Credit Union",
-            0.0, 0.0, 0.0, 0.055, 25, 5, False, 0.015, 0.0, 0.0, 0.75, 0.80, 1.25, 0.08,
-            0.0, 0.0, 0.11, 0.09, 0.03, 0.02, 0.40, 0.06, 0.015, 0.02, False, 250,
-            DEFAULT_RENT_ROLL.copy(), ""
-        ])})
+        st.session_state.update(default_state())
         st.session_state.unsaved_changes = False
 
     s = st.session_state
@@ -681,6 +809,7 @@ def main():
             k1, k2 = st.columns(2)
             s.purchase_price = k1.number_input("Purchase Price", value=s.purchase_price, step=50000.0)
             s.appraisal = k2.number_input("Appraisal", value=s.appraisal, step=50000.0)
+            s.property_address = st.text_input("Property Address (For Geocoding)", value=s.property_address)
             k3, k4 = st.columns(2)
             s.noi = k3.number_input("Stabilized NOI", value=s.noi, step=5000.0)
             s.rate = k4.slider("Interest Rate", 0.01, 0.15, s.rate, 0.0025, format="%.4f")
@@ -733,7 +862,6 @@ def main():
             
         err = st.data_editor(rr_df, num_rows="dynamic", use_container_width=True)
         
-        # Explicit apply to prevent UI twitching
         if not normalize_rr(err).equals(rr_df):
             st.warning("Rent roll changes are staged. Click below to apply to the deal model.")
             if st.button("Apply Rent Roll Changes", type="primary"):
@@ -750,7 +878,7 @@ def main():
         st.subheader("Amortization & Paydown")
         k1, k2, k3 = st.columns(3)
         k1.metric("Monthly P&I", f"${out['m_pmt']:,.2f}"); k2.metric("Annual DS", f"${out['annual_ds']:,.0f}")
-        k3.metric("Balloon Balance", f"${out['balloon']:,.0f}")
+        k3.metric("Balloon Balance", f"${out['balloon']:,.0f}", delta=f"{safe_ratio(out['balloon'], out['L']):.1%} of orig" if out['L']>0 else None, delta_color="normal")
         if not out['amort_df'].empty and DEPS["plotly"]:
             fig = px.bar(out['amort_df'], x="Period", y=["Principal", "Interest"], color_discrete_sequence=["#CFB87C", "#1E293B"])
             fig.update_layout(template="plotly_dark", paper_bgcolor="#0B0F19", plot_bgcolor="#0F172A", barmode="stack")
@@ -775,7 +903,7 @@ def main():
         k1.metric("Net Exit Proceeds", f"${out['rets']['Net Exit']:,.0f}")
         k2.metric("Total CF", f"${out['rets']['Total CF']:,.0f}")
 
-    # TAB 6: Canada Intel (Degraded Mode Aware)
+    # TAB 6: Canada Intel
     with tabs[5]:
         st.subheader("Sovereign Intelligence")
         latest, hist, boc_deg = fetch_boc_history()
@@ -791,11 +919,15 @@ def main():
             else: st.success(f"**{tit}**: {txt}")
             
         if latest:
+            st.write("Rate Locking")
             s.rate_lock_enabled = st.toggle("Lock Deal Rate to 5Y GoC", value=s.rate_lock_enabled)
             s.rate_lock_spread_bps = st.number_input("Risk Spread (bps)", 50, 1000, int(s.rate_lock_spread_bps), 5)
             if s.rate_lock_enabled:
                 new_r = (latest.get('5Y Yield', {}).get('val', 0) + s.rate_lock_spread_bps/100)/100
-                if abs(s.rate - new_r) > 0.0001: s.rate = new_r; st.rerun()
+                st.info(f"Indexed rate: {new_r:.2%}")
+                if st.button("Apply Indexed Rate"):
+                    s.rate = new_r
+                    st.rerun()
 
             c1, c2, c3 = st.columns(3)
             c1.metric("5Y GoC Yield", f"{latest.get('5Y Yield', {}).get('val', 0):.2f}%")
@@ -812,7 +944,20 @@ def main():
         st.subheader("[SIMULATED] Market Comparables")
         st.warning("Data generated programmatically. Not for production credit approval.")
         comps = generate_comps(s.property_type, s.noi, s.appraisal, s.deal_id)
+        
+        geo = geocode_address(s.property_address) if s.property_address else None
+        if not geo: st.info("Using Toronto fallback anchor. Provide valid address for precise geocoding.")
+        c_lat, c_lon = (geo["lat"], geo["lon"]) if geo else (43.65, -79.38)
+        
+        comps["lat"] = c_lat + np.random.default_rng(abs(hash(s.deal_id))).uniform(-0.05, 0.05, 5)
+        comps["lon"] = c_lon + np.random.default_rng(abs(hash(s.deal_id)+1)).uniform(-0.05, 0.05, 5)
+        
         st.dataframe(comps.drop(columns=["lat","lon"]).style.format({"Cap Rate": "{:.2%}", "NOI": "${:,.0f}", "Value": "${:,.0f}"}), hide_index=True, use_container_width=True)
+        if DEPS["plotly"]:
+            fig = px.scatter_mapbox(comps, lat="lat", lon="lon", hover_name="Comparable", size_max=15, zoom=10, height=400, mapbox_style="carto-darkmatter")
+            fig.add_trace(go.Scattermapbox(lat=[c_lat], lon=[c_lon], mode='markers', marker=go.scattermapbox.Marker(size=14, color='gold'), text=["Subject Property"], hoverinfo='text'))
+            fig.update_layout(margin={"r":0,"t":0,"l":0,"b":0})
+            st.plotly_chart(fig, use_container_width=True)
 
     # TAB 8: Diligence
     with tabs[7]:
@@ -826,13 +971,34 @@ def main():
         
         try:
             with DatabaseManager.get_conn() as conn:
-                docs = pd.read_sql_query("SELECT id, filename, category FROM documents WHERE deal_id=?", conn, params=(s.deal_id,))
+                docs = pd.read_sql_query("SELECT id, filename, category, is_encrypted FROM documents WHERE deal_id=?", conn, params=(s.deal_id,))
             if not docs.empty:
                 st.dataframe(docs, hide_index=True, use_container_width=True)
                 dl_id = st.selectbox("Delete Doc", docs["id"].tolist() + ["-- Select --"], index=len(docs))
                 del_doc_confirm = st.checkbox("Confirm doc delete")
                 if dl_id != "-- Select --" and st.button("Delete Document", disabled=not del_doc_confirm):
                     DatabaseManager.delete_doc(dl_id); st.rerun()
+                
+                if DEPS["ocr"]:
+                    st.write("OCR Scanner")
+                    sc_id = st.selectbox("Scan Doc", docs["id"].tolist())
+                    if st.button("Extract PDF Text"):
+                        try:
+                            with DatabaseManager.get_conn() as conn:
+                                r_doc = conn.execute("SELECT path, is_encrypted FROM documents WHERE id=?", (sc_id,)).fetchone()
+                            raw_b = Path(r_doc["path"]).read_bytes()
+                            
+                            if r_doc["is_encrypted"]:
+                                key = get_encryption_key()
+                                if not key: raise ValueError("Requires ALENZA_DB_ENCRYPTION_KEY to scan encrypted doc.")
+                                raw_b = decrypt_bytes(raw_b, key)
+                                
+                            doc_pdf = fitz.open(stream=raw_b, filetype="pdf")
+                            text = "\n".join([page.get_text() for page in doc_pdf])
+                            st.text_area("Extracted Preview", text[:1000] + "...", height=200)
+                            kws = ["noi", "environmental", "phase", "lease", "rent", "appraisal"]
+                            st.dataframe(pd.DataFrame([{"Keyword": k, "Mentions": text.lower().count(k)} for k in kws]), hide_index=True)
+                        except Exception as e: st.error(f"Scan failed: Ensure file is a valid PDF. {e}")
         except sqlite3.Error: pass
 
     # TAB 9: Export
@@ -892,7 +1058,7 @@ def main():
     # TAB 10: QA
     with tabs[9]:
         st.subheader("System Health & Validation")
-        st.info("Local SQLite and documents are stored on the app filesystem. Unencrypted at rest. Host persistence varies by cloud provider.")
+        st.info("Local SQLite and documents are stored on the app filesystem. Unencrypted at rest unless configured otherwise. Host persistence varies by cloud provider.")
         v_err, v_warn = ValidationEngine.validate_deal_state(get_current_state(), out['req_equity'])
         for e in v_err: st.error(e)
         for w in v_warn: st.warning(w)
@@ -900,6 +1066,15 @@ def main():
         
         st.write("Financial Exact-Value Tests")
         st.dataframe(ValidationEngine.run_financial_self_tests(), hide_index=True, use_container_width=True)
+        
+        st.write("Version Rollback")
+        v_df = DatabaseManager.get_versions(s.deal_id)
+        if not v_df.empty:
+            v_opts = {f"{r['created_at']} · v{r['id']}": r["id"] for _, r in v_df.iterrows()}
+            v_id_label = st.selectbox("Restore Version", list(v_opts.keys()))
+            if st.button("Restore"):
+                state_restore = DatabaseManager.load_version(v_opts[v_id_label])
+                if state_restore: st.session_state.update(state_restore); st.rerun()
 
     h_post = hashlib.sha256(json.dumps(get_current_state(), default=str, sort_keys=True).encode()).hexdigest()
     if h_post != h_pre: s.unsaved_changes = True
