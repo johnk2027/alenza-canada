@@ -1491,7 +1491,7 @@ def main():
                     hide_index=True
                 )
     
-    # ==========================================
+   # ==========================================
     # TAB 4: CANADA INTEL (SOVEREIGN DATA)
     # ==========================================
     
@@ -1499,52 +1499,66 @@ def main():
         st.subheader("🇨🇦 Canadian Sovereign Intelligence")
         st.caption("Real-time market data from Bank of Canada and Statistics Canada")
         
-        # Bank of Canada Rates
+        # ==========================================
+        # BANK OF CANADA RATES - ENHANCED WITH GRAPHS
+        # ==========================================
+        
         st.write("### 🏦 Bank of Canada - Key Rates & Yields")
         
         @st.cache_data(ttl=3600)
-        def fetch_boc_rates():
-            """Fetch Bank of Canada rates"""
+        def fetch_boc_rates_history():
+            """Fetch Bank of Canada rates with history for charts"""
             try:
-                url = "https://www.bankofcanada.ca/valet/observations/FXUSDCAD,BD.CDN.2YR.DQ.YLD,BD.CDN.5YR.DQ.YLD,BD.CDN.10YR.DQ.YLD/json?recent=1"
+                # Fetch last 90 days of data for charts
+                url = "https://www.bankofcanada.ca/valet/observations/FXUSDCAD,BD.CDN.2YR.DQ.YLD,BD.CDN.5YR.DQ.YLD,BD.CDN.10YR.DQ.YLD/json?recent=90"
                 response = requests.get(url, timeout=10)
                 response.raise_for_status()
                 data = response.json()
                 
                 observations = data.get('observations', [])
                 if not observations:
-                    return None
+                    return None, None
                 
-                latest = observations[-1]
+                # Build history dataframe
+                history = []
+                for obs in observations:
+                    date = obs.get('d')
+                    row = {'Date': pd.to_datetime(date)}
+                    
+                    for key, name in [
+                        ('FXUSDCAD', 'USD/CAD'),
+                        ('BD.CDN.2YR.DQ.YLD', '2-Year Yield'),
+                        ('BD.CDN.5YR.DQ.YLD', '5-Year Yield'),
+                        ('BD.CDN.10YR.DQ.YLD', '10-Year Yield')
+                    ]:
+                        try:
+                            val = obs.get(key, {}).get('v')
+                            row[name] = float(val) if val else None
+                        except:
+                            row[name] = None
+                    
+                    history.append(row)
                 
-                result = {}
-                for key, name in [
-                    ('FXUSDCAD', 'USD/CAD'),
-                    ('BD.CDN.2YR.DQ.YLD', '2-Year Yield'),
-                    ('BD.CDN.5YR.DQ.YLD', '5-Year Yield'),
-                    ('BD.CDN.10YR.DQ.YLD', '10-Year Yield')
-                ]:
-                    try:
-                        val = latest.get(key, {}).get('v')
-                        result[name] = float(val) if val else None
-                    except:
-                        result[name] = None
+                history_df = pd.DataFrame(history).sort_values('Date')
                 
-                result['Date'] = latest.get('d')
-                return result
+                # Latest values
+                latest = history_df.iloc[-1] if not history_df.empty else None
+                
+                return latest, history_df
             except Exception as e:
                 logger.error(f"BOC fetch failed: {e}")
-                return None
+                return None, None
         
-        boc_data = fetch_boc_rates()
+        boc_latest, boc_history = fetch_boc_rates_history()
         
-        if boc_data:
+        if boc_latest is not None:
+            # Metric cards
             col1, col2, col3, col4 = st.columns(4)
             
-            usd_cad = boc_data.get('USD/CAD')
-            yield_2y = boc_data.get('2-Year Yield')
-            yield_5y = boc_data.get('5-Year Yield')
-            yield_10y = boc_data.get('10-Year Yield')
+            usd_cad = boc_latest.get('USD/CAD')
+            yield_2y = boc_latest.get('2-Year Yield')
+            yield_5y = boc_latest.get('5-Year Yield')
+            yield_10y = boc_latest.get('10-Year Yield')
             
             col1.metric(
                 "USD / CAD", 
@@ -1559,7 +1573,7 @@ def main():
             col3.metric(
                 "Canada 5-Year", 
                 f"{yield_5y:.2f}%" if yield_5y else "N/A",
-                help="Government of Canada 5-year bond yield - key benchmark for CRE lending"
+                help="Government of Canada 5-year bond yield - CRE benchmark"
             )
             col4.metric(
                 "Canada 10-Year", 
@@ -1567,154 +1581,234 @@ def main():
                 help="Government of Canada 10-year bond yield"
             )
             
-            if boc_data.get('Date'):
-                st.caption(f"Data as of: {boc_data['Date']}")
+            # Date stamp
+            if not boc_history.empty:
+                st.caption(f"📅 Latest data: {boc_history['Date'].iloc[-1].strftime('%B %d, %Y')}")
             
-            # Yield curve spread analysis
+            st.markdown("---")
+            
+            # ==========================================
+            # GRAPH 1: YIELD CURVE (Current Snapshot)
+            # ==========================================
+            st.write("#### 📈 Current Yield Curve")
+            
+            curve_data = pd.DataFrame({
+                'Tenor': ['2-Year', '5-Year', '10-Year'],
+                'Yield': [yield_2y, yield_5y, yield_10y]
+            })
+            
+            # Create yield curve chart
+            if DEPENDENCIES['plotly']:
+                import plotly.express as px
+                import plotly.graph_objects as go
+                
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=curve_data['Tenor'],
+                    y=curve_data['Yield'],
+                    mode='lines+markers',
+                    line=dict(color='#CFB87C', width=3),
+                    marker=dict(size=12, color='#CFB87C'),
+                    name='Current Yield Curve'
+                ))
+                
+                fig.update_layout(
+                    title='Government of Canada Yield Curve',
+                    xaxis_title='Maturity',
+                    yaxis_title='Yield (%)',
+                    template='plotly_dark',
+                    paper_bgcolor='#0B0F19',
+                    plot_bgcolor='#0F172A',
+                    height=350,
+                    margin=dict(l=20, r=20, t=40, b=20),
+                    yaxis=dict(tickformat='.2f', ticksuffix='%')
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.bar_chart(curve_data.set_index('Tenor'), use_container_width=True)
+            
+            # Yield spread
             if yield_2y and yield_10y:
                 spread = yield_10y - yield_2y
-                st.metric(
+                spread_color = "normal" if spread > 0 else "inverted"
+                
+                col_a, col_b = st.columns(2)
+                col_a.metric(
                     "2s10s Spread", 
                     f"{spread:.2f}%",
-                    delta="Normal curve" if spread > 0 else "Inverted",
-                    help="Difference between 10-year and 2-year yields. Inversion often signals recession expectations."
+                    help="10Y minus 2Y yield. Negative = inverted curve (recession signal)"
                 )
-        else:
-            st.warning("⚠️ Unable to fetch Bank of Canada data. Please check your internet connection.")
-        
-        st.markdown("---")
-        
-        # Statistics Canada Labour Data
-        st.write("### 📊 Canadian Labour Market")
-        
-        @st.cache_data(ttl=86400)
-        def fetch_unemployment():
-            """Fetch unemployment rate from Statistics Canada"""
-            try:
-                url = "https://www150.statcan.gc.ca/n1/tbl/csv/14100287-eng.zip"
-                response = requests.get(url, timeout=20)
-                response.raise_for_status()
+                col_b.metric(
+                    "Curve Status",
+                    "📈 Normal (Steepening)" if spread > 0.25 else 
+                    "📉 Inverted (Warning)" if spread < 0 else 
+                    "➡️ Flat (Transition)",
+                    help="Yield curve shape indicates market growth expectations"
+                )
+            
+            st.markdown("---")
+            
+            # ==========================================
+            # GRAPH 2: YIELD HISTORY (90-Day Trend)
+            # ==========================================
+            st.write("#### 📊 90-Day Yield Trend")
+            
+            if not boc_history.empty and DEPENDENCIES['plotly']:
+                fig2 = go.Figure()
                 
-                with zipfile.ZipFile(io.BytesIO(response.content)) as z:
-                    csv_files = [f for f in z.namelist() if f.endswith('.csv')]
-                    if not csv_files:
-                        return None
+                colors = {'2-Year Yield': '#CFB87C', '5-Year Yield': '#F59E0B', '10-Year Yield': '#EF4444'}
+                
+                for col_name in ['2-Year Yield', '5-Year Yield', '10-Year Yield']:
+                    if col_name in boc_history.columns:
+                        fig2.add_trace(go.Scatter(
+                            x=boc_history['Date'],
+                            y=boc_history[col_name],
+                            mode='lines',
+                            name=col_name,
+                            line=dict(color=colors.get(col_name, '#FFFFFF'), width=2),
+                            hovertemplate=f'{col_name}: %{{y:.2f}}%<br>Date: %{{x}}<extra></extra>'
+                        ))
+                
+                fig2.update_layout(
+                    title='Government of Canada Bond Yields - Last 90 Days',
+                    xaxis_title='Date',
+                    yaxis_title='Yield (%)',
+                    template='plotly_dark',
+                    paper_bgcolor='#0B0F19',
+                    plot_bgcolor='#0F172A',
+                    height=400,
+                    margin=dict(l=20, r=20, t=40, b=20),
+                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+                    yaxis=dict(tickformat='.2f', ticksuffix='%'),
+                    hovermode='x unified'
+                )
+                
+                st.plotly_chart(fig2, use_container_width=True)
+            elif not boc_history.empty:
+                # Fallback to Streamlit native chart
+                chart_cols = [c for c in ['2-Year Yield', '5-Year Yield', '10-Year Yield'] if c in boc_history.columns]
+                if chart_cols:
+                    st.line_chart(
+                        boc_history.set_index('Date')[chart_cols],
+                        use_container_width=True
+                    )
+            
+            st.markdown("---")
+            
+            # ==========================================
+            # GRAPH 3: FX RATE HISTORY
+            # ==========================================
+            st.write("#### 💱 USD/CAD Exchange Rate - 90-Day Trend")
+            
+            if not boc_history.empty and 'USD/CAD' in boc_history.columns:
+                if DEPENDENCIES['plotly']:
+                    fig3 = go.Figure()
                     
-                    with z.open(csv_files[0]) as f:
-                        df = pd.read_csv(f)
+                    fig3.add_trace(go.Scatter(
+                        x=boc_history['Date'],
+                        y=boc_history['USD/CAD'],
+                        mode='lines',
+                        name='USD/CAD',
+                        fill='tozeroy',
+                        fillcolor='rgba(207, 184, 124, 0.1)',
+                        line=dict(color='#CFB87C', width=2),
+                        hovertemplate='USD/CAD: %{y:.4f}<br>Date: %{x}<extra></extra>'
+                    ))
                     
-                    # Filter for Canada unemployment rate
-                    mask = (
-                        (df['GEO'].str.lower() == 'canada') &
-                        (df['Labour force characteristics'].str.lower() == 'unemployment rate') &
-                        (df['Sex'].str.lower() == 'both sexes') &
-                        (df['Age group'].str.lower() == '15 years and over')
+                    # Add average line
+                    avg_rate = boc_history['USD/CAD'].mean()
+                    fig3.add_hline(
+                        y=avg_rate, 
+                        line_dash="dash", 
+                        line_color="#9CA3AF",
+                        annotation_text=f"Avg: {avg_rate:.4f}",
+                        annotation_position="bottom right"
                     )
                     
-                    unemployment = df[mask][['REF_DATE', 'VALUE']].copy()
-                    unemployment.columns = ['Date', 'Unemployment Rate']
-                    unemployment['Date'] = pd.to_datetime(unemployment['Date'])
-                    unemployment['Unemployment Rate'] = pd.to_numeric(unemployment['Unemployment Rate'], errors='coerce')
-                    unemployment = unemployment.dropna().sort_values('Date').tail(24)
+                    fig3.update_layout(
+                        title='USD/CAD Exchange Rate - Last 90 Days',
+                        xaxis_title='Date',
+                        yaxis_title='USD/CAD',
+                        template='plotly_dark',
+                        paper_bgcolor='#0B0F19',
+                        plot_bgcolor='#0F172A',
+                        height=350,
+                        margin=dict(l=20, r=20, t=40, b=20),
+                        hovermode='x unified'
+                    )
                     
-                    return unemployment
-            except Exception as e:
-                logger.error(f"StatsCan fetch failed: {e}")
-                return None
-        
-        unemp_data = fetch_unemployment()
-        
-        if unemp_data is not None and not unemp_data.empty:
-            latest_unemp = unemp_data['Unemployment Rate'].iloc[-1]
-            prev_unemp = unemp_data['Unemployment Rate'].iloc[-2] if len(unemp_data) > 1 else latest_unemp
+                    st.plotly_chart(fig3, use_container_width=True)
+                else:
+                    st.line_chart(
+                        boc_history.set_index('Date')['USD/CAD'],
+                        use_container_width=True
+                    )
+                
+                # FX stats
+                fx_min = boc_history['USD/CAD'].min()
+                fx_max = boc_history['USD/CAD'].max()
+                fx_change = boc_history['USD/CAD'].iloc[-1] - boc_history['USD/CAD'].iloc[0]
+                
+                col_a, col_b, col_c = st.columns(3)
+                col_a.metric("90-Day Low", f"{fx_min:.4f}")
+                col_b.metric("90-Day High", f"{fx_max:.4f}")
+                col_c.metric("90-Day Change", f"{fx_change:.4f}", 
+                           delta=f"{fx_change:+.4f}")
             
-            col1, col2 = st.columns(2)
-            col1.metric(
-                "Unemployment Rate", 
-                f"{latest_unemp:.1f}%",
-                delta=f"{latest_unemp - prev_unemp:+.1f}%",
-                help="Canada national unemployment rate (seasonally adjusted)"
-            )
+            st.markdown("---")
             
-            # Chart
-            st.line_chart(
-                unemp_data.set_index('Date')['Unemployment Rate'],
-                use_container_width=True
-            )
-            st.caption("Source: Statistics Canada Table 14-10-0287-01")
-        else:
-            st.warning("⚠️ Unable to fetch labour market data")
-        
-        st.markdown("---")
-        
-        # Market Intelligence Summary
-        st.write("### 📈 Market Rate Intelligence for Underwriting")
-        
-        if boc_data and yield_5y:
-            # Calculate indicative spread
+            # ==========================================
+            # GRAPH 4: RATE SPREAD TO DEAL
+            # ==========================================
+            st.write("#### 🎯 Deal Rate vs Market Benchmark")
+            
             current_rate = safe_float(s.rate) * 100 if s.rate else 5.25
             
-            col1, col2 = st.columns(2)
-            col1.metric(
-                "5-Year GoC Benchmark", 
-                f"{yield_5y:.2f}%",
-                help="Risk-free rate for 5-year term"
-            )
-            col2.metric(
-                "Your Deal Rate", 
-                f"{current_rate:.2f}%",
-                delta=f"{current_rate - yield_5y:+.2f}% spread",
-                help="Spread over Government of Canada benchmark"
-            )
-            
-            # Commentary
-            spread_to_goc = current_rate - yield_5y
-            
-            if spread_to_goc < 1.5:
-                st.success(f"✅ Tight pricing: {spread_to_goc:.2f}% spread to GoC suggests competitive terms")
-            elif spread_to_goc < 3.0:
-                st.info(f"ℹ️ Standard pricing: {spread_to_goc:.2f}% spread to GoC is within typical range")
-            else:
-                st.warning(f"⚠️ Wide spread: {spread_to_goc:.2f}% spread to GoC may indicate higher risk premium")
-        
-        st.markdown("---")
-        
-        # Corporation Verification
-        st.write("### 🔍 Corporation Verification")
-        
-        corp_number = st.text_input("Verify Federal Corporation Number (Optional)", 
-                                   placeholder="e.g., 123456-7")
-        
-        if corp_number:
-            @st.cache_data(ttl=86400)
-            def verify_corp(number):
-                """Verify Canadian federal corporation"""
-                cleaned = re.sub(r'\D', '', number)
-                if not cleaned:
-                    return None
+            if yield_5y and DEPENDENCIES['plotly']:
+                comparison_data = pd.DataFrame({
+                    'Rate Type': ['Your Deal Rate', '5Y GoC Benchmark', 'Spread'],
+                    'Rate (%)': [current_rate, yield_5y, current_rate - yield_5y]
+                })
                 
-                try:
-                    url = f"https://www.ic.gc.ca/app/scr/cc/CorporationsCanada/api/corporations/{cleaned}.json?lang=eng"
-                    response = requests.get(url, timeout=10)
-                    if response.status_code == 200:
-                        data = response.json()
-                        if isinstance(data, list) and data:
-                            corp = data[0]
-                            return {
-                                'name': corp.get('name', 'Unknown'),
-                                'status': 'Active',
-                                'number': cleaned
-                            }
-                except:
-                    pass
-                return None
-            
-            result = verify_corp(corp_number)
-            if result:
-                st.success(f"✅ Verified: {result['name']}")
-                st.json(result)
-            else:
-                st.warning("Corporation not found or registry unavailable")
+                colors_bar = ['#CFB87C', '#3B82F6', '#10B981' if current_rate - yield_5y < 3 else '#F59E0B']
+                
+                fig4 = go.Figure()
+                fig4.add_trace(go.Bar(
+                    x=comparison_data['Rate Type'],
+                    y=comparison_data['Rate (%)'],
+                    marker_color=colors_bar,
+                    text=[f"{v:.2f}%" for v in comparison_data['Rate (%)']],
+                    textposition='outside',
+                    textfont=dict(color='white', size=14)
+                ))
+                
+                fig4.update_layout(
+                    title='Deal Pricing vs Government Benchmark',
+                    template='plotly_dark',
+                    paper_bgcolor='#0B0F19',
+                    plot_bgcolor='#0F172A',
+                    height=350,
+                    margin=dict(l=20, r=20, t=40, b=20),
+                    showlegend=False,
+                    yaxis=dict(tickformat='.2f', ticksuffix='%')
+                )
+                
+                st.plotly_chart(fig4, use_container_width=True)
+                
+                # Spread commentary
+                spread_to_goc = current_rate - yield_5y
+                
+                if spread_to_goc < 1.5:
+                    st.success(f"✅ **Tight Pricing:** {spread_to_goc:.2f}% spread indicates competitive institutional terms")
+                elif spread_to_goc < 3.0:
+                    st.info(f"ℹ️ **Standard Pricing:** {spread_to_goc:.2f}% spread is within typical CRE lending range")
+                else:
+                    st.warning(f"⚠️ **Wide Spread:** {spread_to_goc:.2f}% spread may reflect higher risk premium or transitional asset")
+        
+        else:
+            st.warning("⚠️ Unable to fetch Bank of Canada data. Please check your internet connection.")
+            st.info("💡 Charts and rate comparisons will appear here when data is available.")
     
     # ==========================================
     # TAB 5: MARKET COMPS
