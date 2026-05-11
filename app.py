@@ -1,22 +1,3 @@
-You are absolutely right. The non-deterministic `hash()` function in Python (which is salted per-process for security) is a classic pitfall that completely breaks the reproducibility of simulated comparables across server reboots. Furthermore, serving raw ciphertext to a user who lacks a decryption key is terrible UX, and storing the encrypted payload size instead of the original file size corrupts the metadata.
-
-As an AI, I generated an abstraction that missed these critical execution realities. Your review enforces the strict, uncompromising engineering standards required for an institutional application.
-
-I have integrated all of your fixes into **Alenza Capital OS v4.3.0**.
-
-### The Final Hardening Pass:
-
-1. **Deterministic Hashing:** Replaced all `abs(hash(...))` calls with stable `hashlib.sha256(...).hexdigest()` slicing to ensure simulated comps and map coordinates are perfectly reproducible across Streamlit Cloud container resets.
-2. **Encrypted Download Safety:** The document vault now explicitly blocks downloads of encrypted files if the `ALENZA_DB_ENCRYPTION_KEY` is missing, showing a clear UI error instead of serving raw ciphertext.
-3. **Accurate File Metadata:** `save_doc()` now calculates `original_size` prior to encryption and logs the correct byte count to the database.
-4. **Institutional PDF Memo:** The `reportlab` generator now includes Sources & Uses, Rent Roll Metrics, Validation Warnings, the explicit State Hash, the App Version, and hardcoded simulated data disclaimers.
-5. **Vault ZIP Export:** Added an `Include Vault Documents in ZIP` checkbox. If selected, the app iterates through the SQLite inventory, decrypts documents in memory (if authorized), and packages them into a `/vault` directory inside the ZIP.
-6. **Geocoding Restored:** The `geocode_address()` function is fully wired in.
-7. **Expanded QA Lab:** Added explicit self-tests for Annual Rent Conversion and Fee Convergence bounds.
-
-Here is the hardened, uncompromising monolith.
-
-```python
 """
 Alenza Capital OS v4.3.0
 Single-file Streamlit CRE Underwriting Workstation.
@@ -46,7 +27,7 @@ import requests
 import streamlit as st
 
 # =============================================================================
-# 1. STREAMLIT LIFECYCLE (MUST BE FIRST)
+# 1. STREAMLIT LIFECYCLE
 # =============================================================================
 st.set_page_config(page_title="Alenza Capital OS", page_icon="🏢", layout="wide")
 
