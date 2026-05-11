@@ -50,6 +50,18 @@ try:
 except Exception:
     EXCEL_AVAILABLE = False
 
+try:
+    import openpyxl  # noqa: F401
+    OPENPYXL_AVAILABLE = True
+except Exception:
+    OPENPYXL_AVAILABLE = False
+
+try:
+    import xlrd  # noqa: F401
+    XLRD_AVAILABLE = True
+except Exception:
+    XLRD_AVAILABLE = False
+
 
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "alenza_data"
@@ -65,6 +77,18 @@ def clean_filename(filename: str) -> str:
     base = str(filename or "file").strip()
     base = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", base)
     return base[:150] or "file"
+
+
+def current_audit_user() -> str:
+    try:
+        if hasattr(st, "user") and getattr(st.user, "email", None):
+            return str(st.user.email)
+    except Exception:
+        pass
+    try:
+        return str(st.secrets.get("APP_USER", os.environ.get("APP_USER", "Local User")))
+    except Exception:
+        return os.environ.get("APP_USER", "Local User")
 
 
 def safe_float(value: Any, default: float = 0.0) -> float:
@@ -103,6 +127,7 @@ DEFAULT_RENT_ROLL = [
 
 DEFAULT_STATE = {
     "deal_id": f"deal_{int(datetime.now().timestamp())}",
+    "deal_name": "Untitled Deal",
     "sponsor": "Alenza Client",
     "property_address": "100 King St W, Toronto, ON",
     "property_type": "Multifamily",
@@ -225,10 +250,10 @@ def normalize_loaded_state(state: dict) -> dict:
 def extract_clean_state() -> dict:
     """Collect deal fields for storage and export."""
     keys = [
-        "deal_id", "sponsor", "property_address", "property_type", "transaction_type",
+        "deal_id", "deal_name", "sponsor", "property_address", "property_type", "transaction_type",
         "lender_profile", "purchase_price", "appraisal", "noi", "target_ltv",
         "target_ltc", "target_dscr", "target_dy", "rate", "amort", "term",
-        "is_io", "fees", "closing_costs", "reserves", "rent_roll_dict"
+        "is_io", "fees", "closing_costs", "reserves", "rent_roll_dict", "last_saved_at"
     ]
     state = {}
     for k in keys:
@@ -243,10 +268,11 @@ def extract_clean_state() -> dict:
     return state
 
 
-def reset_to_new_deal():
-    """Start a clean deal while preserving app defaults."""
+def reset_to_new_deal(name: str = "", rerun: bool = True):
     fresh = DEFAULT_STATE.copy()
-    fresh["deal_id"] = f"deal_{int(datetime.now().timestamp())}_{uuid.uuid4().hex[:6]}"
+    clean_name = str(name or "Untitled Deal").strip() or "Untitled Deal"
+    fresh["deal_id"] = f"deal_{int(datetime.now().timestamp())}_{uuid.uuid4().hex[:8]}"
+    fresh["deal_name"] = clean_name
     fresh["sponsor"] = ""
     fresh["property_address"] = ""
     fresh["purchase_price"] = 0.0
@@ -259,6 +285,11 @@ def reset_to_new_deal():
     for k, v in fresh.items():
         st.session_state[k] = v
 
+    st.session_state.unsaved_changes = True
+
+    if rerun:
+        st.rerun()
+
 
 for k, v in normalize_loaded_state(DEFAULT_STATE).items():
     if k not in st.session_state:
@@ -268,7 +299,9 @@ for k, v in normalize_loaded_state(DEFAULT_STATE).items():
 class DatabaseManager:
     @staticmethod
     def init_db():
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(DB_PATH, timeout=30) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
             c = conn.cursor()
             c.execute(
                 """CREATE TABLE IF NOT EXISTS deals
@@ -287,10 +320,10 @@ class DatabaseManager:
     @staticmethod
     def log_audit(action: str, details: str):
         try:
-            with sqlite3.connect(DB_PATH) as conn:
+            with sqlite3.connect(DB_PATH, timeout=30) as conn:
                 conn.execute(
                     "INSERT INTO audit_log (user, action, details, timestamp) VALUES (?, ?, ?, ?)",
-                    ("Local User", str(action)[:100], str(details)[:1000], datetime.now())
+                    (current_audit_user(), str(action)[:100], str(details)[:1000], datetime.now())
                 )
         except Exception:
             pass
@@ -301,7 +334,7 @@ class DatabaseManager:
         state_json = json.dumps(state, default=str)
         safe_name = str(name or "Untitled Deal").strip() or "Untitled Deal"
 
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(DB_PATH, timeout=30) as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO deals (id, name, state_json, updated_at) VALUES (?, ?, ?, ?)",
                 (deal_id, safe_name, state_json, datetime.now())
@@ -310,7 +343,7 @@ class DatabaseManager:
 
     @staticmethod
     def delete_deal(deal_id: str):
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(DB_PATH, timeout=30) as conn:
             c = conn.cursor()
             c.execute("SELECT path FROM documents WHERE deal_id = ?", (deal_id,))
             rows = c.fetchall()
@@ -330,7 +363,7 @@ class DatabaseManager:
 
     @staticmethod
     def load_deal(deal_id: str):
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(DB_PATH, timeout=30) as conn:
             c = conn.cursor()
             c.execute("SELECT state_json FROM deals WHERE id = ?", (deal_id,))
             row = c.fetchone()
@@ -345,7 +378,7 @@ class DatabaseManager:
 
     @staticmethod
     def get_all_deals():
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(DB_PATH, timeout=30) as conn:
             return pd.read_sql_query(
                 "SELECT id, name, updated_at FROM deals ORDER BY updated_at DESC",
                 conn
@@ -354,11 +387,11 @@ class DatabaseManager:
     @staticmethod
     def save_document(deal_id: str, file, category: str):
         safe_name = clean_filename(file.name)
-        doc_id = f"doc_{int(datetime.now().timestamp())}_{uuid.uuid4().hex[:6]}_{safe_name}"
+        doc_id = f"doc_{int(datetime.now().timestamp())}_{uuid.uuid4().hex}_{safe_name}"[:200]
         path = DOC_DIR / doc_id
         path.write_bytes(file.getbuffer())
 
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(DB_PATH, timeout=30) as conn:
             conn.execute(
                 "INSERT INTO documents (id, deal_id, filename, category, path, uploaded_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (doc_id, deal_id, safe_name, category, str(path), datetime.now())
@@ -367,7 +400,7 @@ class DatabaseManager:
 
     @staticmethod
     def delete_document(doc_id: str):
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(DB_PATH, timeout=30) as conn:
             c = conn.cursor()
             c.execute("SELECT path, filename FROM documents WHERE id = ?", (doc_id,))
             row = c.fetchone()
@@ -650,7 +683,7 @@ class ExportEngine:
                 amort_df.to_excel(writer, sheet_name="Amortization", index=False)
 
             try:
-                with sqlite3.connect(DB_PATH) as conn:
+                with sqlite3.connect(DB_PATH, timeout=30) as conn:
                     audit_df = pd.read_sql_query(
                         "SELECT user, action, details, timestamp FROM audit_log ORDER BY timestamp DESC LIMIT 100",
                         conn,
@@ -1040,39 +1073,58 @@ with st.sidebar:
 
     with st.expander("📁 PIPELINE MANAGER", expanded=True):
         all_deals = DatabaseManager.get_all_deals()
-        deal_options = ["-- Start New Deal --"] + all_deals["name"].tolist()
-        selected = st.selectbox("Select Deal", deal_options)
 
-        c_new, c_load, c_del, c_dup = st.columns(4)
+        deal_lookup = {}
+        deal_options = ["-- Start New Deal --"]
+        if not all_deals.empty:
+            for _, row in all_deals.iterrows():
+                short_id = str(row["id"])[-8:]
+                updated = pd.to_datetime(row["updated_at"], errors="coerce")
+                updated_label = updated.strftime("%Y-%m-%d %H:%M") if pd.notna(updated) else "no date"
+                label = f"{row['name']} · {updated_label} · {short_id}"
+                deal_options.append(label)
+                deal_lookup[label] = row["id"]
+
+        selected = st.selectbox("Select Deal", deal_options)
+        selected_deal_id = deal_lookup.get(selected)
+        new_deal_name = st.text_input("New Deal Name", value="Untitled Deal")
+
+        c_new, c_load = st.columns(2)
+        c_del, c_dup = st.columns(2)
 
         with c_new:
             if st.button("➕ New"):
-                reset_to_new_deal()
-                st.success("New deal started.")
-                st.rerun()
+                reset_to_new_deal(new_deal_name)
 
         with c_load:
-            if st.button("📂 Load") and selected != "-- Start New Deal --":
-                deal_id_to_load = all_deals.loc[all_deals["name"] == selected, "id"].values[0]
-                loaded_state = DatabaseManager.load_deal(deal_id_to_load)
+            if st.button("📂 Load") and selected_deal_id:
+                loaded_state = DatabaseManager.load_deal(selected_deal_id)
                 if loaded_state:
+                    loaded_state = normalize_loaded_state(loaded_state)
                     for k, v in loaded_state.items():
                         st.session_state[k] = v
-                    st.session_state.deal_id = loaded_state.get("deal_id", deal_id_to_load)
+                    st.session_state.deal_id = loaded_state.get("deal_id", selected_deal_id)
+                    st.session_state.unsaved_changes = False
                     st.rerun()
                 else:
                     st.error("Could not load selected deal.")
 
+        confirm_delete = st.checkbox("Confirm delete selected deal", value=False)
+
         with c_del:
-            if st.button("🗑️ Del") and selected != "-- Start New Deal --":
-                deal_id_to_del = all_deals.loc[all_deals["name"] == selected, "id"].values[0]
-                DatabaseManager.delete_deal(deal_id_to_del)
-                st.success("Wiped.")
-                st.rerun()
+            if st.button("🗑️ Del") and selected_deal_id:
+                if confirm_delete:
+                    DatabaseManager.delete_deal(selected_deal_id)
+                    st.success("Deal deleted.")
+                    st.rerun()
+                else:
+                    st.warning("Check confirm before deleting.")
 
         with c_dup:
-            if st.button("📑 Dup."):
-                st.session_state.deal_id = f"deal_{int(datetime.now().timestamp())}_{uuid.uuid4().hex[:6]}"
+            if st.button("📑 Dup.") and selected_deal_id:
+                st.session_state.deal_id = f"deal_{int(datetime.now().timestamp())}_{uuid.uuid4().hex[:8]}"
+                st.session_state.deal_name = f"Copy of {st.session_state.get('deal_name', 'Untitled Deal')}"
+                st.session_state.unsaved_changes = True
                 st.warning("Duplicated in memory. Save to persist.")
 
     st.markdown("---")
@@ -1080,6 +1132,7 @@ with st.sidebar:
     s = st.session_state
 
     with st.expander("🏢 ASSET PROFILE", expanded=True):
+        s.deal_name = st.text_input("Deal Name", value=s.get("deal_name", "Untitled Deal"))
         s.sponsor = st.text_input("Sponsor", value=s.get("sponsor", ""))
         s.property_address = st.text_input("Address", value=s.get("property_address", ""))
 
@@ -1089,7 +1142,7 @@ with st.sidebar:
 
         s.appraisal = st.number_input("Appraisal ($)", value=safe_float(s.get("appraisal")), step=100000.0, min_value=0.0)
         s.purchase_price = st.number_input("Cost Basis ($)", value=safe_float(s.get("purchase_price")), step=100000.0, min_value=0.0)
-        s.noi = st.number_input("Stabilized NOI ($)", value=safe_float(s.get("noi")), step=10000.0)
+        s.noi = st.number_input("Stabilized NOI ($)", value=safe_float(s.get("noi")), step=10000.0, min_value=0.0)
 
     with st.expander("📊 CREDIT POLICY", expanded=True):
         profiles = list(UnderwritingEngine.LENDER_PROFILES.keys())
@@ -1097,9 +1150,9 @@ with st.sidebar:
         s.lender_profile = st.selectbox("Policy Preset", profiles, index=profile_idx)
 
         preset = UnderwritingEngine.LENDER_PROFILES[s.lender_profile]
-        s.target_ltv = st.slider("Max LTV %", 50.0, 95.0, float(preset["max_ltv"] * 100), step=0.5) / 100
-        s.target_dscr = st.slider("Min DSCR x", 1.0, 1.75, float(preset["min_dscr"]), step=0.05)
-        s.target_dy = st.slider("Min DY %", 5.0, 15.0, float(preset["min_dy"] * 100), step=0.25) / 100
+        s.target_ltv = st.slider("Max LTV %", 50.0, 95.0, float(normalize_percent(s.get("target_ltv"), preset["max_ltv"]) * 100), step=0.5) / 100
+        s.target_dscr = st.slider("Min DSCR x", 1.0, 1.75, float(safe_float(s.get("target_dscr"), preset["min_dscr"])), step=0.05)
+        s.target_dy = st.slider("Min DY %", 5.0, 15.0, float(normalize_percent(s.get("target_dy"), preset["min_dy"]) * 100), step=0.25) / 100
         s.target_ltc = st.slider("Max LTC %", 50.0, 100.0, float(normalize_percent(s.get("target_ltc"), 0.80) * 100), step=0.5) / 100
 
     with st.expander("💰 DEBT STRUCTURE", expanded=True):
@@ -1192,7 +1245,7 @@ with tabs[0]:
             ],
             "Binding": ["✅ YES" if gate == k else "" for k in ["LTV", "LTC", "DSCR", "Debt Yield"]],
         })
-        st.table(df_gates)
+        st.dataframe(df_gates, hide_index=True, use_container_width=True)
 
         st.subheader("Sources & Uses")
         df_su = pd.DataFrame({
@@ -1227,10 +1280,18 @@ with tabs[1]:
 
     if rr_upload:
         try:
-            if rr_upload.name.lower().endswith(".csv"):
+            filename = rr_upload.name.lower()
+            rr_upload.seek(0)
+            if filename.endswith(".csv"):
                 imported_rr = pd.read_csv(rr_upload)
+            elif filename.endswith(".xls"):
+                if not XLRD_AVAILABLE:
+                    raise RuntimeError("Reading .xls files requires xlrd. Add xlrd to requirements.txt or upload .xlsx/.csv.")
+                imported_rr = pd.read_excel(rr_upload, engine="xlrd")
             else:
-                imported_rr = pd.read_excel(rr_upload)
+                if not OPENPYXL_AVAILABLE:
+                    raise RuntimeError("Reading .xlsx files requires openpyxl. Add openpyxl to requirements.txt or upload .csv.")
+                imported_rr = pd.read_excel(rr_upload, engine="openpyxl")
 
             imported_rr = normalize_rent_roll_columns(imported_rr)
             st.write("Preview")
@@ -1339,7 +1400,7 @@ with tabs[4]:
     REQUIRED_DOCS = ["Appraisal", "Phase I ESA", "T12 Financials", "Rent Roll", "Sponsor Bio", "Purchase Agreement"]
 
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(DB_PATH, timeout=30) as conn:
             docs = pd.read_sql_query(
                 "SELECT id, filename, category, uploaded_at FROM documents WHERE deal_id = ?",
                 conn,
@@ -1386,6 +1447,8 @@ with tabs[5]:
 
     if not OCR_AVAILABLE:
         st.warning("OCR dependencies not found. Install pytesseract, pillow, and pymupdf to enable extraction.")
+    else:
+        st.caption("Local OCR is best for clean statements. For scanned multi-column offering memorandums, use a structured document service such as Textract or Document AI before importing results.")
 
     uploaded_fin = st.file_uploader(
         "Upload Appraisal / T12 / Operating Statement (PDF/Image)",
@@ -1473,12 +1536,15 @@ with tabs[7]:
 
     with c1:
         if st.button("💾 Save Deal Record to Database", use_container_width=True):
+            st.session_state.last_saved_at = datetime.now().isoformat(timespec="seconds")
             clean_state = extract_clean_state()
-            name_parts = [clean_state.get("sponsor") or "Untitled Sponsor", clean_state.get("property_type") or "Asset"]
-            DatabaseManager.save_deal(s.deal_id, " - ".join(name_parts), clean_state)
-            st.success("Deal permanently saved to SQLite.")
+            deal_name = clean_state.get("deal_name") or clean_state.get("sponsor") or "Untitled Deal"
+            DatabaseManager.save_deal(s.deal_id, deal_name, clean_state)
+            st.session_state.unsaved_changes = False
+            st.success(f"Deal saved at {st.session_state.last_saved_at}.")
 
     clean_state = extract_clean_state()
+    export_stamp = datetime.now().strftime("%Y%m%d_%H%M")
 
     try:
         excel_bytes = ExportEngine.generate_excel(clean_state, loan_amt, gate, amort_df, score, classification)
@@ -1493,7 +1559,7 @@ with tabs[7]:
             st.download_button(
                 "📊 Download Excel Model",
                 data=excel_bytes,
-                file_name=f"{clean_filename(s.sponsor or 'Alenza')}_Model.xlsx",
+                file_name=f"{clean_filename(s.get('deal_name') or s.sponsor or 'Alenza')}_{export_stamp}_Model.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
@@ -1505,18 +1571,18 @@ with tabs[7]:
         try:
             with zipfile.ZipFile(buf, "w") as z:
                 if excel_ready:
-                    z.writestr("Underwriting_Model.xlsx", excel_bytes)
+                    z.writestr(f"Underwriting_Model_{export_stamp}.xlsx", excel_bytes)
 
                 if PDF_AVAILABLE:
                     pdf_bytes = ExportEngine.generate_pdf(clean_state, loan_amt, gate, score, classification, risk_flags)
                     if pdf_bytes:
-                        z.writestr("Executive_Summary.pdf", pdf_bytes)
+                        z.writestr(f"Executive_Summary_{export_stamp}.pdf", pdf_bytes)
 
                 if DB_PATH.exists():
-                    z.write(DB_PATH, "Database_Backup.db")
+                    z.write(DB_PATH, f"Database_Backup_{export_stamp}.db")
 
                 try:
-                    with sqlite3.connect(DB_PATH) as conn:
+                    with sqlite3.connect(DB_PATH, timeout=30) as conn:
                         vault_docs = pd.read_sql_query(
                             "SELECT filename, path FROM documents WHERE deal_id = ?",
                             conn,
@@ -1532,13 +1598,21 @@ with tabs[7]:
             st.download_button(
                 "📦 Download Full Deal Package",
                 buf.getvalue(),
-                file_name=f"{clean_filename(s.sponsor or 'Alenza')}_Package.zip",
+                file_name=f"{clean_filename(s.get('deal_name') or s.sponsor or 'Alenza')}_{export_stamp}_Package.zip",
                 mime="application/zip",
                 use_container_width=True,
             )
         except Exception as e:
             st.error(f"Package export failed: {e}")
 
+
+with st.expander("Deployment Notes"):
+    st.write("SQLite is suitable for local or low-concurrency use. For a shared team deployment, move the persistence layer to PostgreSQL.")
+    st.write("Keep alenza_data/ out of source control. Store API keys in Streamlit secrets or environment variables.")
+    if not OPENPYXL_AVAILABLE:
+        st.warning("openpyxl is not installed. .xlsx rent-roll uploads may fail.")
+    if not XLRD_AVAILABLE:
+        st.info("xlrd is not installed. Legacy .xls rent-roll uploads are disabled until xlrd is added.")
 
 st.markdown("---")
 st.caption(
