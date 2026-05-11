@@ -59,6 +59,7 @@ st.set_page_config(
 APP_VERSION = "3.0.2"
 SCHEMA_VERSION = 4
 MAX_UPLOAD_SIZE_MB = 50
+AUTOSAVE_INTERVAL_SECONDS = 300  # 5 minutes
 
 DATA_DIR = Path("alenza_data")
 DOC_DIR = DATA_DIR / "documents"
@@ -541,6 +542,7 @@ def handle_errors(default_return=None, show_error=True):
 
     return decorator
 
+
 # ==========================================
 # AUTOSAVE HELPERS
 # ==========================================
@@ -571,10 +573,6 @@ def seconds_since_iso(value: Any) -> Optional[float]:
 
 
 def save_current_deal(reason: str = "MANUAL_SAVE", silent: bool = False) -> bool:
-    """
-    Centralized save path used by manual save, autosave, and keyboard shortcut save.
-    Returns True only when the deal was actually saved.
-    """
     state = extract_clean_state()
     errors, warnings = ValidationEngine.validate(state)
 
@@ -599,7 +597,6 @@ def save_current_deal(reason: str = "MANUAL_SAVE", silent: bool = False) -> bool
 
     if saved:
         now = utc_now_iso()
-
         st.session_state.unsaved_changes = False
         st.session_state.last_saved_at = now
 
@@ -626,12 +623,6 @@ def save_current_deal(reason: str = "MANUAL_SAVE", silent: bool = False) -> bool
 
 
 def maybe_autosave_current_deal() -> bool:
-    """
-    Saves the current deal when:
-    - autosave is enabled
-    - there are unsaved changes
-    - at least AUTOSAVE_INTERVAL_SECONDS has passed since last autosave/save
-    """
     if not st.session_state.get("autosave_enabled", True):
         return False
 
@@ -1267,6 +1258,9 @@ def default_state() -> dict:
         "pref_rate": 0.09,
         "rent_roll_dict": DEFAULT_RENT_ROLL.copy(),
         "last_saved_at": None,
+        "last_autosaved_at": None,
+        "autosave_enabled": True,
+        "autosave_status": "",
         "unsaved_changes": False,
         "schema_version": SCHEMA_VERSION,
         "app_version": APP_VERSION,
@@ -1345,7 +1339,14 @@ def extract_clean_state() -> dict:
 
 def stable_state_hash() -> str:
     state = extract_clean_state()
-    for key in ["last_saved_at", "unsaved_changes", "app_version", "schema_version"]:
+    for key in [
+        "last_saved_at",
+        "last_autosaved_at",
+        "autosave_status",
+        "unsaved_changes",
+        "app_version",
+        "schema_version",
+    ]:
         state.pop(key, None)
     return hash_state(state)
 
@@ -1513,6 +1514,7 @@ def run_financial_self_tests() -> pd.DataFrame:
 
 DatabaseManager.init_db()
 
+
 # ==========================================
 # MAIN APPLICATION - PART 2
 # ==========================================
@@ -1529,9 +1531,6 @@ def main():
         s["autosave_enabled"] = True
     state_hash_before = stable_state_hash()
 
-    # ==========================================
-    # SIDEBAR
-    # ==========================================
     with st.sidebar:
         st.title("🏛️ ALENZA OS")
         st.caption(f"v{APP_VERSION}")
@@ -1603,14 +1602,17 @@ def main():
                 st.info("No saved deals yet.")
 
             if st.button("💾 Save Deal", use_container_width=True, key="btn_save"):
-                save_current_deal(reason="MANUAL_SAVE")
+                if save_current_deal(reason="MANUAL_SAVE"):
+                    st.success("✅ Deal saved!")
 
-        # Autosave status
+        s.autosave_enabled = st.checkbox(
+            "Auto-save every 5 minutes",
+            value=s.get("autosave_enabled", True),
+            key="autosave_toggle_sidebar",
+        )
+
         if s.get("autosave_status"):
             st.caption(f"🕐 {s.autosave_status}")
-        
-        # Autosave toggle
-        s.autosave_enabled = st.checkbox("Auto-Save (5 min)", value=s.get("autosave_enabled", True))
 
         if s.get("unsaved_changes"):
             st.warning("⚠️ Unsaved changes")
@@ -1649,24 +1651,12 @@ def main():
             s.closing_costs = st.number_input("Closing Costs ($)", value=safe_float(s.get("closing_costs", 0)), step=1000.0, min_value=0.0, format="%.0f", key="debt_closing_costs")
             s.reserves = st.number_input("Required Reserves ($)", value=safe_float(s.get("reserves", 0)), step=1000.0, min_value=0.0, format="%.0f", key="debt_reserves")
 
-    # ==========================================
-    # END SIDEBAR - START MAIN CONTENT
-    # ==========================================
-
     state_hash_after = stable_state_hash()
     if state_hash_after != state_hash_before and not s.get("_loading_deal", False) and not s.get("unsaved_changes", False):
         s.unsaved_changes = True
 
-    # ==========================================
-    # CORE CALCULATIONS
-    # ==========================================
-
     rr_df = normalize_rent_roll_columns(pd.DataFrame(s.get("rent_roll_dict", [])))
-    loan_amt, gate, gates, total_uses, req_equity = UnderwritingEngine.size_loan(
-        s.noi, s.appraisal, s.purchase_price, s.closing_costs, s.reserves, s.fees,
-        s.rate, s.amort, s.term, s.is_io,
-        s.target_ltv, s.target_ltc, s.target_dscr, s.target_dy
-    )
+    loan_amt, gate, gates, total_uses, req_equity = UnderwritingEngine.size_loan(s.noi, s.appraisal, s.purchase_price, s.closing_costs, s.reserves, s.fees, s.rate, s.amort, s.term, s.is_io, s.target_ltv, s.target_ltc, s.target_dscr, s.target_dy)
     amort_df, monthly_pmt, balloon = UnderwritingEngine.amort_schedule(loan_amt, s.rate, s.amort, s.term, s.is_io)
     annual_ds = monthly_pmt * 12
     actual_ltv = loan_amt / s.appraisal if safe_float(s.appraisal) > 0 else 0
@@ -1677,18 +1667,10 @@ def main():
     score, tier = UnderwritingEngine.score_deal(actual_ltv, actual_ltc, actual_dscr, actual_dy, s.lender_profile)
     errors, warnings = ValidationEngine.validate(extract_clean_state())
 
-    # ==========================================
-    # AUTOSAVE CHECK
-    # ==========================================
     maybe_autosave_current_deal()
-
-    # ==========================================
-    # HEADER & KPIs
-    # ==========================================
 
     st.title(f"{s.sponsor or 'New Deal'} | {s.property_address or 'Property Profile'}")
     st.caption(f"ALENZA CAPITAL OS | CONSTRAINT: {gate} | {tier}")
-    
     if errors:
         for error in errors[:3]:
             st.error(f"❌ {error}")
@@ -1707,105 +1689,40 @@ def main():
     col6.metric("DEAL SCORE", f"{score}/1000", help=tier)
     st.markdown("---")
 
-    # ==========================================
-    # TABS
-    # ==========================================
-
-    tabs = st.tabs([
-        "📊 Sizing & Risk",
-        "🧪 Sensitivity",
-        "📝 Rent Roll",
-        "📅 Amortization",
-        "🇨🇦 Canada Intel",
-        "📈 Market Comps",
-        "📎 Diligence Room",
-        "💾 Save & Export",
-        "✅ QA & Health"
-    ])
-
-    # ==========================================
-    # TAB 0: SIZING & RISK
-    # ==========================================
+    tabs = st.tabs(["📊 Sizing & Risk", "🧪 Sensitivity", "📝 Rent Roll", "📅 Amortization", "🇨🇦 Canada Intel", "📈 Market Comps", "📎 Diligence Room", "💾 Save & Export", "✅ QA & Health"])
 
     with tabs[0]:
         col_left, col_right = st.columns([1.5, 1])
         with col_left:
             st.subheader("📐 Constraint Analysis")
-            constraints_df = pd.DataFrame({
-                "Constraint": ["LTV", "LTC", "DSCR", "Debt Yield"],
-                "Threshold": [
-                    f"{s.target_ltv * 100:.1f}%",
-                    f"{s.target_ltc * 100:.1f}%",
-                    f"{s.target_dscr:.2f}x",
-                    f"{s.target_dy * 100:.2f}%"
-                ],
-                "Max Proceeds": [
-                    f"${gates.get('LTV', 0):,.0f}",
-                    f"${gates.get('LTC', 0):,.0f}",
-                    f"${gates.get('DSCR', 0):,.0f}",
-                    f"${gates.get('Debt Yield', 0):,.0f}"
-                ],
-                "Binding": ["✅ ACTIVE" if gate == g else "" for g in ["LTV", "LTC", "DSCR", "Debt Yield"]]
-            })
+            constraints_df = pd.DataFrame({"Constraint": ["LTV", "LTC", "DSCR", "Debt Yield"], "Threshold": [f"{s.target_ltv * 100:.1f}%", f"{s.target_ltc * 100:.1f}%", f"{s.target_dscr:.2f}x", f"{s.target_dy * 100:.2f}%"], "Max Proceeds": [f"${gates.get('LTV', 0):,.0f}", f"${gates.get('LTC', 0):,.0f}", f"${gates.get('DSCR', 0):,.0f}", f"${gates.get('Debt Yield', 0):,.0f}"], "Binding": ["✅ ACTIVE" if gate == g else "" for g in ["LTV", "LTC", "DSCR", "Debt Yield"]]})
             st.dataframe(constraints_df, hide_index=True, use_container_width=True)
-            
             st.subheader("💰 Sources & Uses")
             total_fees = loan_amt * s.fees
-            su_df = pd.DataFrame({
-                "Category": ["Cost Basis", "Closing Costs", "Reserves", "Financing Fees", "TOTAL USES"],
-                "Uses": [
-                    f"${s.purchase_price:,.0f}",
-                    f"${s.closing_costs:,.0f}",
-                    f"${s.reserves:,.0f}",
-                    f"${total_fees:,.0f}",
-                    f"${total_uses:,.0f}"
-                ],
-                "Sources": ["Senior Debt", "Sponsor Equity", "", "", "TOTAL SOURCES"],
-                "Amount": [
-                    f"${loan_amt:,.0f}",
-                    f"${req_equity:,.0f}",
-                    "", "", f"${total_uses:,.0f}"
-                ]
-            })
+            su_df = pd.DataFrame({"Category": ["Cost Basis", "Closing Costs", "Reserves", "Financing Fees", "TOTAL USES"], "Uses": [f"${s.purchase_price:,.0f}", f"${s.closing_costs:,.0f}", f"${s.reserves:,.0f}", f"${total_fees:,.0f}", f"${total_uses:,.0f}"], "Sources": ["Senior Debt", "Sponsor Equity", "", "", "TOTAL SOURCES"], "Amount": [f"${loan_amt:,.0f}", f"${req_equity:,.0f}", "", "", f"${total_uses:,.0f}"]})
             st.dataframe(su_df, hide_index=True, use_container_width=True)
-        
         with col_right:
             st.subheader("🔍 Risk Assessment")
             flags = []
-            if actual_ltv > 0.75:
-                flags.append(("high", f"⚠️ High Leverage: {actual_ltv * 100:.1f}% LTV"))
-            elif actual_ltv < 0.55 and loan_amt > 0:
-                flags.append(("low", f"✅ Conservative Leverage: {actual_ltv * 100:.1f}% LTV"))
-            if actual_dscr < 1.20 and loan_amt > 0:
-                flags.append(("high", f"⚠️ Tight Coverage: {actual_dscr:.2f}x DSCR"))
-            elif actual_dscr > 1.50:
-                flags.append(("low", f"✅ Strong Coverage: {actual_dscr:.2f}x DSCR"))
-            if s.is_io:
-                flags.append(("medium", "ℹ️ Interest-Only Structure"))
-            if req_equity < 0:
-                flags.append(("high", f"🚨 Negative Equity: ${abs(req_equity):,.0f}"))
-            if walt > 0 and walt < 3:
-                flags.append(("high", f"⚠️ Short WALT: {walt:.1f} years"))
-            if exp1 > 0.30:
-                flags.append(("high", f"🚨 High Rollover: {exp1 * 100:.1f}%"))
-            if not flags:
-                flags.append(("low", "✅ No Significant Risk Flags"))
-            
+            if actual_ltv > 0.75: flags.append(("high", f"⚠️ High Leverage: {actual_ltv * 100:.1f}% LTV"))
+            elif actual_ltv < 0.55 and loan_amt > 0: flags.append(("low", f"✅ Conservative Leverage: {actual_ltv * 100:.1f}% LTV"))
+            if actual_dscr < 1.20 and loan_amt > 0: flags.append(("high", f"⚠️ Tight Coverage: {actual_dscr:.2f}x DSCR"))
+            elif actual_dscr > 1.50: flags.append(("low", f"✅ Strong Coverage: {actual_dscr:.2f}x DSCR"))
+            if s.is_io: flags.append(("medium", "ℹ️ Interest-Only Structure"))
+            if req_equity < 0: flags.append(("high", f"🚨 Negative Equity: ${abs(req_equity):,.0f}"))
+            if walt > 0 and walt < 3: flags.append(("high", f"⚠️ Short WALT: {walt:.1f} years"))
+            if exp1 > 0.30: flags.append(("high", f"🚨 High Rollover: {exp1 * 100:.1f}%"))
+            if not flags: flags.append(("low", "✅ No Significant Risk Flags"))
             for severity, message in flags:
-                if severity == "high":
-                    st.error(message)
-                elif severity == "medium":
-                    st.warning(message)
-                else:
-                    st.success(message)
-            
+                if severity == "high": st.error(message)
+                elif severity == "medium": st.warning(message)
+                else: st.success(message)
             st.markdown("---")
             st.subheader("📊 Key Metrics")
             breakeven_occ = UnderwritingEngine.breakeven_occupancy(s.noi, occ, annual_ds)
             st.metric("Breakeven Occupancy", f"{breakeven_occ * 100:.1f}%", delta=f"Current: {occ * 100:.1f}%" if occ > 0 else None)
             st.metric("Required Equity", f"${req_equity:,.0f}")
             st.metric("Implied Cap Rate", f"{(s.noi / s.appraisal * 100):.2f}%" if s.appraisal > 0 else "N/A")
-            
             st.markdown("---")
             st.subheader("🏗️ Capital Stack")
             s.mezz_debt = st.number_input("Mezzanine Debt ($)", value=safe_float(s.get("mezz_debt", 0)), min_value=0.0, step=100000.0, format="%.0f", key="capital_mezz_debt")
@@ -1816,70 +1733,43 @@ def main():
             st.metric("Fixed Charge Coverage", f"{stack['Fixed Charge Coverage']:.2f}x")
             st.caption(f"Total Capital: ${stack['Total Capital']:,.0f} | Fixed Charges: ${stack['Fixed Charges']:,.0f}")
 
-    # ==========================================
-    # TAB 1: SENSITIVITY
-    # ==========================================
-
     with tabs[1]:
         st.subheader("🧪 Sensitivity Analysis")
         sensitivity_df = SensitivityEngine.generate_matrix(extract_clean_state())
         st.dataframe(sensitivity_df, hide_index=True, use_container_width=True)
-        
         st.markdown("---")
         st.subheader("🔥 Proceeds Heatmap")
         heatmap_df = SensitivityEngine.proceeds_heatmap(extract_clean_state())
         currency_cols = [c for c in heatmap_df.columns if c != "NOI Shock"]
         st.dataframe(heatmap_df.style.format({col: "${:,.0f}" for col in currency_cols}), hide_index=True, use_container_width=True)
-        
         if DEPENDENCIES.get("plotly"):
             try:
                 import plotly.express as px
                 plot_df = heatmap_df.set_index("NOI Shock")[currency_cols] / 1_000_000
-                fig = px.imshow(
-                    plot_df, text_auto=".1f", aspect="auto",
-                    title="Max Proceeds Sensitivity ($MM)",
-                    labels={"x": "Rate Shock", "y": "NOI Shock", "color": "Max Proceeds ($MM)"}
-                )
-                fig.update_traces(
-                    texttemplate="$%{z:.1f}MM",
-                    hovertemplate="NOI Shock: %{y}<br>Rate Shock: %{x}<br>Max Proceeds: $%{z:.1f}MM<extra></extra>"
-                )
+                fig = px.imshow(plot_df, text_auto=".1f", aspect="auto", title="Max Proceeds Sensitivity ($MM)", labels={"x": "Rate Shock", "y": "NOI Shock", "color": "Max Proceeds ($MM)"})
+                fig.update_traces(texttemplate="$%{z:.1f}MM", hovertemplate="NOI Shock: %{y}<br>Rate Shock: %{x}<br>Max Proceeds: $%{z:.1f}MM<extra></extra>")
                 fig.update_layout(template="plotly_dark", paper_bgcolor="#0B0F19", plot_bgcolor="#0F172A", height=450, margin=dict(l=20, r=20, t=50, b=20))
                 st.plotly_chart(fig, use_container_width=True)
             except Exception as e:
                 st.info(f"Heatmap chart unavailable: {e}")
-        
         st.markdown("---")
         st.subheader("🎯 Custom Stress Test")
         c1, c2, c3 = st.columns(3)
-        with c1:
-            rate_shock = st.slider("Rate Shock (bps)", -200, 200, 0, 25, key="custom_rate_shock") / 10000
-        with c2:
-            noi_shock = st.slider("NOI Shock (%)", -30, 30, 0, 5, key="custom_noi_shock") / 100
-        with c3:
-            ltv_shock = st.slider("LTV Adjustment (%)", -10, 10, 0, 1, key="custom_ltv_shock") / 100
-        
+        with c1: rate_shock = st.slider("Rate Shock (bps)", -200, 200, 0, 25, key="custom_rate_shock") / 10000
+        with c2: noi_shock = st.slider("NOI Shock (%)", -30, 30, 0, 5, key="custom_noi_shock") / 100
+        with c3: ltv_shock = st.slider("LTV Adjustment (%)", -10, 10, 0, 1, key="custom_ltv_shock") / 100
         stressed_rate = max(0.001, s.rate + rate_shock)
         stressed_noi = max(0, s.noi * (1 + noi_shock))
         stressed_ltv = min(1.25, max(0.01, s.target_ltv + ltv_shock))
-        stressed_loan, stressed_gate, _, _, _ = UnderwritingEngine.size_loan(
-            stressed_noi, s.appraisal, s.purchase_price, s.closing_costs, s.reserves, s.fees,
-            stressed_rate, s.amort, s.term, s.is_io,
-            stressed_ltv, s.target_ltc, s.target_dscr, s.target_dy
-        )
+        stressed_loan, stressed_gate, _, _, _ = UnderwritingEngine.size_loan(stressed_noi, s.appraisal, s.purchase_price, s.closing_costs, s.reserves, s.fees, stressed_rate, s.amort, s.term, s.is_io, stressed_ltv, s.target_ltc, s.target_dscr, s.target_dy)
         _, stressed_monthly_pmt, _ = UnderwritingEngine.amort_schedule(stressed_loan, stressed_rate, s.amort, s.term, s.is_io)
         stressed_annual_ds = stressed_monthly_pmt * 12
         stressed_dscr = stressed_noi / stressed_annual_ds if stressed_annual_ds > 0 else 0
-        
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Stressed Proceeds", f"${stressed_loan:,.0f}", delta=f"${stressed_loan - loan_amt:,.0f}" if loan_amt > 0 else None)
         c2.metric("Constraint", stressed_gate)
         c3.metric("Stressed LTV", f"{(stressed_loan / s.appraisal * 100):.1f}%" if s.appraisal > 0 else "N/A")
         c4.metric("Stressed DSCR", f"{stressed_dscr:.2f}x")
-
-    # ==========================================
-    # TAB 2: RENT ROLL
-    # ==========================================
 
     with tabs[2]:
         st.subheader("📝 Rent Roll Management")
@@ -1911,7 +1801,6 @@ def main():
                         st.rerun()
             except Exception as e:
                 st.error(f"Import failed: {str(e)[:200]}")
-        
         edit_df = normalize_rent_roll_columns(pd.DataFrame(s.get("rent_roll_dict", [])))
         col_add, col_clear = st.columns(2)
         with col_add:
@@ -1926,23 +1815,12 @@ def main():
                 s.rent_roll_dict = []
                 s.unsaved_changes = True
                 st.rerun()
-        
         st.caption("After editing the table, click Update Rent Roll to apply changes to the model.")
-        edited_df = st.data_editor(
-            edit_df, num_rows="dynamic", use_container_width=True, hide_index=True,
-            column_config={
-                "Tenant": st.column_config.TextColumn("Tenant Name", width="large"),
-                "SF": st.column_config.NumberColumn("Square Feet", min_value=0, step=100, format="%d"),
-                "Remaining Term": st.column_config.NumberColumn("Lease Term (Yrs)", min_value=0.0, step=0.5, format="%.1f"),
-                "Monthly Rent": st.column_config.NumberColumn("Monthly Rent ($)", min_value=0.0, step=100.0, format="$%.2f")
-            },
-            key="rent_roll_editor"
-        )
+        edited_df = st.data_editor(edit_df, num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"Tenant": st.column_config.TextColumn("Tenant Name", width="large"), "SF": st.column_config.NumberColumn("Square Feet", min_value=0, step=100, format="%d"), "Remaining Term": st.column_config.NumberColumn("Lease Term (Yrs)", min_value=0.0, step=0.5, format="%.1f"), "Monthly Rent": st.column_config.NumberColumn("Monthly Rent ($)", min_value=0.0, step=100.0, format="$%.2f")}, key="rent_roll_editor")
         if st.button("💾 Update Rent Roll", use_container_width=True, key="update_rent_roll"):
             s.rent_roll_dict = normalize_rent_roll_columns(edited_df).to_dict("records")
             s.unsaved_changes = True
             st.rerun()
-        
         if not edited_df.empty:
             st.markdown("---")
             st.subheader("📊 Rent Roll Analytics")
@@ -1954,10 +1832,6 @@ def main():
             c4.metric("Rent PSF", f"${met_psf:.2f}")
             c5.metric("WALT (Yrs)", f"{met_walt:.2f}")
             c6.metric("12-Mo Rollover", f"{met_exp1 * 100:.1f}%")
-
-    # ==========================================
-    # TAB 3: AMORTIZATION
-    # ==========================================
 
     with tabs[3]:
         st.subheader(f"📅 Amortization Schedule - {s.term} Year Term")
