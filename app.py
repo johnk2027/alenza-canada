@@ -1,7 +1,7 @@
 """
-Alenza Capital OS v4.5.0
+Alenza Capital OS v4.5.1
 Single-file Streamlit CRE Underwriting Workstation.
-Features strict state contracts, cryptographic persistence, tamper-evident audit logs, and exhaustive institutional exports.
+Features strict state contracts, cryptographic persistence, zero-latency state rendering, and exhaustive institutional exports.
 """
 
 from __future__ import annotations
@@ -76,7 +76,7 @@ if DEPS["crypto"]:
 # =============================================================================
 # 3. CONSTANTS, CONVENTIONS & EXPLICIT STATE CONTRACT
 # =============================================================================
-VERSION = "4.5.0"
+VERSION = "4.5.1"
 MAX_UPLOAD_MB = 50
 DATA_DIR = Path("alenza_data")
 DB_PATH = DATA_DIR / "alenza_platform.db"
@@ -579,7 +579,6 @@ class DatabaseManager:
                 c.execute("DELETE FROM deals WHERE id=?", (deal_id,))
                 c.commit()
             
-            # Immutability Fix: Leave audit trail intact, append DELETED record
             cls.log_audit(deal_id, "DELETE_DEAL", f"Deleted deal: {deal_name}")
             return True
         except sqlite3.Error as e:
@@ -663,12 +662,13 @@ class DatabaseManager:
 # =============================================================================
 # 9. MARKET INTELLIGENCE & APIs (Degraded Mode Aware)
 # =============================================================================
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=60)
 def fetch_boc_history(days=365) -> Tuple[dict, pd.DataFrame, bool]:
-    sm = {"FXUSDCAD": "USD/CAD", "BD.CDN.2YR.DQ.YLD": "2Y Yield", "BD.CDN.5YR.DQ.YLD": "5Y Yield", "BD.CDN.10YR.DQ.YLD": "10Y Yield", "V122514": "Overnight Target"}
+    # Fixed Series Identifiers to canonical Valet codes to prevent API errors
+    sm = {"FXUSDCAD": "USD/CAD", "V122539": "2Y Yield", "V122540": "5Y Yield", "V122543": "10Y Yield", "V39079": "Overnight Target"}
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0", "Accept": "application/json"}
     try:
-        r = requests.get(f"https://www.bankofcanada.ca/valet/observations/{','.join(sm.keys())}/json?recent={days}", headers=headers, timeout=15)
+        r = requests.get(f"https://www.bankofcanada.ca/valet/observations/{','.join(sm.keys())}/json?recent={days}", headers=headers, timeout=10)
         r.raise_for_status()
         df = pd.DataFrame([{"Date": pd.to_datetime(o.get("d"), errors="coerce")} | {l: safe_float(o.get(k, {}).get("v")) for k, l in sm.items()} for o in r.json().get("observations", [])])
         df = df.dropna(subset=["Date"])
@@ -680,7 +680,7 @@ def fetch_boc_history(days=365) -> Tuple[dict, pd.DataFrame, bool]:
 
 @st.cache_data(ttl=86400)
 def fetch_unemployment() -> Tuple[pd.DataFrame, bool]:
-    fb = pd.DataFrame({"Date": pd.date_range(start="2023-01-01", periods=12, freq="ME"), "Unemployment": [5.5, 5.7, 5.8, 6.0, 6.2, 6.4, 6.5, 6.6, 6.5, 6.4, 6.2, 6.1]})
+    fb = pd.DataFrame({"Date": pd.date_range(start="2024-01-01", periods=12, freq="ME"), "Unemployment": [5.5, 5.7, 5.8, 6.0, 6.2, 6.4, 6.5, 6.6, 6.5, 6.4, 6.2, 6.1]})
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"}
     try:
         df = pd.read_csv("https://www150.statcan.gc.ca/n1/en/tbl/csv/14100287-eng.csv", storage_options=headers, low_memory=False)
@@ -808,8 +808,6 @@ def main():
         st.session_state.unsaved_changes = False
 
     s = st.session_state
-    h_pre = hashlib.sha256(json.dumps(get_current_state(), default=str, sort_keys=True).encode()).hexdigest()
-    out = calculate_outputs(get_current_state())
 
     # --- Sidebar ---
     with st.sidebar:
@@ -844,22 +842,9 @@ def main():
                 if col_d.button("Del", disabled=not del_confirm):
                     DatabaseManager.delete_deal(d_id); st.rerun()
 
-        if st.button("💾 Save Deal", use_container_width=True):
-            v_err, _ = ValidationEngine.validate_deal_state(get_current_state(), out["req_equity"])
-            if v_err:
-                for e in v_err: st.error(e)
-            else:
-                if DatabaseManager.save_deal(s.deal_id, s.deal_name, get_current_state()):
-                    s.unsaved_changes = False
-                    st.toast("Deal Saved", icon="✅")
-
-    # --- Header ---
+    # --- DYNAMIC PLACEHOLDERS (Zero-Latency Setup) ---
     st.title(f"🏢 {s.deal_name}")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Max Proceeds", f"${out['L']:,.0f}", help=f"Binding: {out['gate']}")
-    c2.metric("Projected IRR", f"{out['rets']['IRR']:.2%}")
-    c3.metric("Equity Multiple", f"{out['rets']['EM']:.2f}x")
-    c4.metric("Req. Sponsor Equity", f"${abs(out['req_equity']):,.0f}", delta="CASH OUT" if out['req_equity']<0 else None, delta_color="inverse" if out['req_equity']<0 else "normal")
+    header_placeholder = st.empty()
 
     # --- Tabs ---
     tabs = st.tabs(["Sizing & Risk", "Sensitivity", "Rent Roll", "Amortization", "Pro Forma", 
@@ -876,55 +861,38 @@ def main():
             s.property_address = st.text_input("Property Address (For Geocoding)", value=s.property_address)
             k3, k4 = st.columns(2)
             s.noi = k3.number_input("Stabilized NOI", value=s.noi, step=5000.0)
-            s.rate = k4.slider("Interest Rate", 0.01, 0.15, s.rate, 0.0025, format="%.4f")
+            
+            # HIGHER PRECISION % TOGGLE
+            s.rate = k4.slider("Interest Rate (%)", 1.00, 15.00, float(s.rate*100), 0.05, format="%.2f") / 100.0
             
             p1, p2, p3 = st.columns(3)
-            s.target_ltv = p1.number_input("Max LTV", value=s.target_ltv, step=0.05)
-            s.target_dscr = p2.number_input("Min DSCR", value=s.target_dscr, step=0.05)
-            s.target_dy = p3.number_input("Min Debt Yield", value=s.target_dy, step=0.01)
+            s.target_ltv = p1.number_input("Max LTV (%)", value=float(s.target_ltv*100), step=1.0) / 100.0
+            s.target_dscr = p2.number_input("Min DSCR (x)", value=float(s.target_dscr), step=0.05)
+            s.target_dy = p3.number_input("Min Debt Yield (%)", value=float(s.target_dy*100), step=0.5) / 100.0
 
             st.subheader("Uses & Capital Stack")
             u1, u2, u3, u4 = st.columns(4)
             s.closing_costs = u1.number_input("Closing Costs ($)", value=s.closing_costs, step=10000.0)
             s.reserves = u2.number_input("Reserves ($)", value=s.reserves, step=10000.0)
-            s.fees = u3.number_input("Financing Fee (%)", value=s.fees, step=0.0025, format="%.4f")
-            s.target_ltc = u4.number_input("Max LTC", value=s.target_ltc, step=0.05)
+            s.fees = u3.number_input("Financing Fee (%)", value=float(s.fees*100), step=0.1) / 100.0
+            s.target_ltc = u4.number_input("Max LTC (%)", value=float(s.target_ltc*100), step=1.0) / 100.0
             
             m1, m2 = st.columns(2)
             s.mezz_debt = m1.number_input("Mezzanine Debt ($)", value=s.mezz_debt, step=50000.0)
-            s.mezz_rate = m1.slider("Mezz Rate", 0.0, 0.25, s.mezz_rate, 0.0025)
+            s.mezz_rate = m1.slider("Mezz Rate (%)", 1.00, 25.00, float(s.mezz_rate*100), 0.10, format="%.2f") / 100.0
             s.pref_equity = m2.number_input("Preferred Equity ($)", value=s.pref_equity, step=50000.0)
-            s.pref_rate = m2.slider("Pref Rate", 0.0, 0.25, s.pref_rate, 0.0025)
+            s.pref_rate = m2.slider("Pref Rate (%)", 1.00, 25.00, float(s.pref_rate*100), 0.10, format="%.2f") / 100.0
             
-            st.metric("Fixed Charge Coverage", f"{out['c_stack']['FCC']:.2f}x")
+            fcc_placeholder = st.empty()
 
         with c2:
             st.subheader("Risk Narrative")
-            flags = []
-            if out['act_ltv'] > 0.75: flags.append(("high", f"High Leverage: {out['act_ltv']:.1%} LTV"))
-            if out['act_dscr'] < 1.20 and out['L'] > 0: flags.append(("high", f"Tight DSCR: {out['act_dscr']:.2f}x"))
-            if out['req_equity'] < 0: flags.append(("medium", f"Cash-out implied: ${abs(out['req_equity']):,.0f} surplus"))
-            if not flags: flags.append(("low", "Standard profile. No active flags."))
-            
-            for f in flags:
-                if f[0] == "high": st.error(f[1])
-                elif f[0] == "medium": st.warning(f[1])
-                else: st.success(f[1])
-                
-            occ_rr = safe_ratio(UnderwritingEngine.rent_roll_metrics(normalize_rr(pd.DataFrame(s.rent_roll_dict)))[1], 1.0)
-            st.metric("Breakeven Occupancy", f"{UnderwritingEngine.breakeven_occupancy(s.noi, max(occ_rr, 0.01), out['c_stack']['FixedCharges']):.1%}")
+            risk_placeholder = st.empty()
 
     # TAB 2: Sensitivity
     with tabs[1]:
         st.subheader("Proceeds Heatmap (NOI vs Rate)")
-        hm = SensitivityEngine.proceeds_heatmap(s.noi, s.appraisal, s.purchase_price, s.closing_costs, s.reserves, s.fees, s.rate, s.amort, s.term, s.is_io, s.target_ltv, s.target_ltc, s.target_dscr, s.target_dy)
-        hm_numeric = hm.drop(columns=["NOI Shock"], errors="ignore")
-        if DEPS["plotly"]:
-            fig = px.imshow(hm_numeric/1e6, text_auto=".1f", aspect="auto", title="Max Proceeds ($MM)")
-            fig.update_layout(template="plotly_dark", paper_bgcolor="#0B0F19", plot_bgcolor="#0F172A")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.dataframe(hm.style.background_gradient(subset=hm_numeric.columns, cmap="YlOrBr").format({c: "${:,.0f}" for c in hm_numeric.columns}), hide_index=True, use_container_width=True)
+        sens_placeholder = st.empty()
 
     # TAB 3: Rent Roll
     with tabs[2]:
@@ -935,7 +903,6 @@ def main():
             d = rr_df.to_dict("records"); d.append({"Tenant":"", "SF":0, "Remaining Term":0, "Monthly Rent":0}); s.rent_roll_dict = d; st.rerun()
             
         err = st.data_editor(rr_df, num_rows="dynamic", use_container_width=True)
-        
         if not normalize_rr(err).equals(rr_df):
             st.warning("Rent roll changes are staged. Click below to apply to the deal model.")
             if st.button("Apply Rent Roll Changes", type="primary"):
@@ -950,13 +917,7 @@ def main():
     # TAB 4: Amortization
     with tabs[3]:
         st.subheader("Amortization & Paydown")
-        k1, k2, k3 = st.columns(3)
-        k1.metric("Monthly P&I", f"${out['m_pmt']:,.2f}"); k2.metric("Annual DS", f"${out['annual_ds']:,.0f}")
-        k3.metric("Balloon Balance", f"${out['balloon']:,.0f}")
-        if not out['amort_df'].empty and DEPS["plotly"]:
-            fig = px.bar(out['amort_df'], x="Period", y=["Principal", "Interest"], color_discrete_sequence=["#CFB87C", "#1E293B"])
-            fig.update_layout(template="plotly_dark", paper_bgcolor="#0B0F19", plot_bgcolor="#0F172A", barmode="stack")
-            st.plotly_chart(fig, use_container_width=True)
+        amort_placeholder = st.empty()
 
     # TAB 5: Pro Forma
     with tabs[4]:
@@ -965,20 +926,16 @@ def main():
             st.write(FINANCIAL_CONVENTIONS)
         
         c1, c2, c3 = st.columns(3)
-        s.pf_rev_growth = c1.slider("Rev Growth", 0.0, 0.1, s.pf_rev_growth, 0.005)
-        s.pf_exp_growth = c2.slider("Exp Growth", 0.0, 0.1, s.pf_exp_growth, 0.005)
-        s.pf_exp_ratio = c3.slider("Exp Ratio", 0.1, 0.8, s.pf_exp_ratio, 0.05)
+        s.pf_rev_growth = c1.slider("Rev Growth (%)", 0.0, 10.0, float(s.pf_rev_growth*100), 0.5) / 100.0
+        s.pf_exp_growth = c2.slider("Exp Growth (%)", 0.0, 10.0, float(s.pf_exp_growth*100), 0.5) / 100.0
+        s.pf_exp_ratio = c3.slider("Exp Ratio (%)", 10.0, 80.0, float(s.pf_exp_ratio*100), 1.0) / 100.0
         
         c4, c5, c6 = st.columns(3)
-        s.pf_exit_cap = c4.slider("Exit Cap", 0.04, 0.12, s.pf_exit_cap, 0.0025)
-        s.pf_term_growth = c5.slider("Terminal Growth", 0.0, 0.05, s.pf_term_growth, 0.005)
-        s.pf_sell_costs = c6.slider("Selling Costs", 0.0, 0.10, s.pf_sell_costs, 0.005)
+        s.pf_exit_cap = c4.slider("Exit Cap (%)", 4.0, 15.0, float(s.pf_exit_cap*100), 0.25) / 100.0
+        s.pf_term_growth = c5.slider("Terminal Growth (%)", 0.0, 5.0, float(s.pf_term_growth*100), 0.5) / 100.0
+        s.pf_sell_costs = c6.slider("Selling Costs (%)", 0.0, 10.0, float(s.pf_sell_costs*100), 0.5) / 100.0
         
-        st.dataframe(out['pf_df'].style.format("${:,.0f}", subset=["Revenue","Expenses","Projected NOI"]).format("{:.1%}", subset=["NOI Margin"]), hide_index=True, use_container_width=True)
-        
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Net Exit Proceeds", f"${out['rets']['Net Exit']:,.0f}")
-        k2.metric("Total CF", f"${out['rets']['Total CF']:,.0f}")
+        pf_placeholder = st.empty()
 
     # TAB 6: Canada Intel
     with tabs[5]:
@@ -1019,14 +976,11 @@ def main():
     with tabs[6]:
         st.subheader("[SIMULATED] Market Comparables")
         comps = generate_comps(s.property_type, s.noi, s.appraisal, s.deal_id)
-        
         geo = geocode_address(s.property_address) if s.property_address else None
         if not geo: st.info("Using Toronto fallback anchor. Provide valid address for precise geocoding.")
         c_lat, c_lon = (geo["lat"], geo["lon"]) if geo else (43.65, -79.38)
-        
         comps["lat"] = c_lat + np.random.default_rng(int(hashlib.sha256(s.deal_id.encode()).hexdigest()[:8], 16)).uniform(-0.05, 0.05, 5)
         comps["lon"] = c_lon + np.random.default_rng(int(hashlib.sha256(s.deal_id.encode()).hexdigest()[8:16], 16)).uniform(-0.05, 0.05, 5)
-        
         st.dataframe(comps.drop(columns=["lat","lon"]).style.format({"Cap Rate": "{:.2%}", "NOI": "${:,.0f}", "Value": "${:,.0f}"}), hide_index=True, use_container_width=True)
         if DEPS["plotly"]:
             fig = px.scatter_mapbox(comps, lat="lat", lon="lon", hover_name="Comparable", size_max=15, zoom=10, height=400, mapbox_style="carto-darkmatter")
@@ -1099,18 +1053,91 @@ def main():
                         except Exception as e: st.error(f"Scan failed: Ensure file is a valid, unencrypted PDF. {e}")
         except sqlite3.Error: pass
 
-    # TAB 9: Export
+    # =============================================================================
+    # LATE CALCULATION & PLACEHOLDER INJECTION
+    # =============================================================================
+    # Calculate everything ONCE using the exact state registered by the sliders above
+    current_state = get_current_state()
+    out = calculate_outputs(current_state)
+    h_pre = hashlib.sha256(json.dumps(current_state, default=str, sort_keys=True).encode()).hexdigest()
+
+    # Fill Top Header
+    with header_placeholder.container():
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Max Proceeds", f"${out['L']:,.0f}")
+        c1.caption(f"⚠️ Binding Constraint: **{out['gate']}**")
+        c2.metric("Projected IRR", f"{out['rets']['IRR']:.2%}")
+        c3.metric("Equity Multiple", f"{out['rets']['EM']:.2f}x")
+        c4.metric("Req. Sponsor Equity", f"${abs(out['req_equity']):,.0f}", delta="CASH OUT" if out['req_equity']<0 else None, delta_color="inverse" if out['req_equity']<0 else "normal")
+
+    # Fill FCC metric
+    with fcc_placeholder.container():
+        st.metric("Fixed Charge Coverage", f"{out['c_stack']['FCC']:.2f}x")
+
+    # Fill Tab 1 Risk
+    with risk_placeholder.container():
+        flags = []
+        if out['act_ltv'] > 0.75: flags.append(("high", f"High Leverage: {out['act_ltv']:.1%} LTV"))
+        if out['act_dscr'] < 1.20 and out['L'] > 0: flags.append(("high", f"Tight DSCR: {out['act_dscr']:.2f}x"))
+        if out['req_equity'] < 0: flags.append(("medium", f"Cash-out implied: ${abs(out['req_equity']):,.0f} surplus"))
+        if not flags: flags.append(("low", "Standard profile. No active flags."))
+        
+        for f in flags:
+            if f[0] == "high": st.error(f[1])
+            elif f[0] == "medium": st.warning(f[1])
+            else: st.success(f[1])
+            
+        occ_rr = safe_ratio(UnderwritingEngine.rent_roll_metrics(normalize_rr(pd.DataFrame(s.rent_roll_dict)))[1], 1.0)
+        st.metric("Breakeven Occupancy", f"{UnderwritingEngine.breakeven_occupancy(s.noi, max(occ_rr, 0.01), out['c_stack']['FixedCharges']):.1%}")
+
+    # Fill Tab 2 Sensitivity
+    with sens_placeholder.container():
+        hm = SensitivityEngine.proceeds_heatmap(s.noi, s.appraisal, s.purchase_price, s.closing_costs, s.reserves, s.fees, s.rate, s.amort, s.term, s.is_io, s.target_ltv, s.target_ltc, s.target_dscr, s.target_dy)
+        hm_numeric = hm.drop(columns=["NOI Shock"], errors="ignore")
+        if DEPS["plotly"]:
+            fig = px.imshow(hm_numeric/1e6, text_auto=".1f", aspect="auto", title="Max Proceeds ($MM)")
+            fig.update_layout(template="plotly_dark", paper_bgcolor="#0B0F19", plot_bgcolor="#0F172A")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.dataframe(hm.style.background_gradient(subset=hm_numeric.columns, cmap="YlOrBr").format({c: "${:,.0f}" for c in hm_numeric.columns}), hide_index=True, use_container_width=True)
+
+    # Fill Tab 4 Amortization
+    with amort_placeholder.container():
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Monthly P&I", f"${out['m_pmt']:,.2f}"); k2.metric("Annual DS", f"${out['annual_ds']:,.0f}")
+        k3.metric("Balloon Balance", f"${out['balloon']:,.0f}")
+        if not out['amort_df'].empty and DEPS["plotly"]:
+            fig = px.bar(out['amort_df'], x="Period", y=["Principal", "Interest"], color_discrete_sequence=["#CFB87C", "#1E293B"])
+            fig.update_layout(template="plotly_dark", paper_bgcolor="#0B0F19", plot_bgcolor="#0F172A", barmode="stack")
+            st.plotly_chart(fig, use_container_width=True)
+
+    # Fill Tab 5 Pro Forma
+    with pf_placeholder.container():
+        st.dataframe(out['pf_df'].style.format("${:,.0f}", subset=["Revenue","Expenses","Projected NOI"]).format("{:.1%}", subset=["NOI Margin"]), hide_index=True, use_container_width=True)
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Net Exit Proceeds", f"${out['rets']['Net Exit']:,.0f}")
+        k2.metric("Total CF", f"${out['rets']['Total CF']:,.0f}")
+
+    # TAB 9: Export (Handled here so it captures final 'out')
     with tabs[8]:
         st.subheader("Institutional Export Suite")
         if out['req_equity'] < 0: st.warning("⚠️ Cash-out structure detected. Confirm lender permits equity extraction before submitting.")
 
-        v_err, v_warn = ValidationEngine.validate_deal_state(get_current_state(), out['req_equity'])
+        v_err, v_warn = ValidationEngine.validate_deal_state(current_state, out['req_equity'])
+
+        if st.button("💾 Save Deal", use_container_width=True):
+            if v_err:
+                for e in v_err: st.error(e)
+            else:
+                if DatabaseManager.save_deal(s.deal_id, s.deal_name, current_state):
+                    s.unsaved_changes = False
+                    st.toast("Deal Saved", icon="✅")
 
         c1, c2, c3 = st.columns(3)
         if DEPS["excel_write"]:
             xl_out = io.BytesIO()
             with pd.ExcelWriter(xl_out, engine="xlsxwriter") as w:
-                pd.DataFrame([get_current_state()]).to_excel(w, sheet_name="Inputs", index=False)
+                pd.DataFrame([current_state]).to_excel(w, sheet_name="Inputs", index=False)
                 pd.DataFrame([out['c_stack']]).to_excel(w, sheet_name="Capital Stack", index=False)
                 pd.DataFrame([out['gates']]).to_excel(w, sheet_name="Constraints", index=False)
                 rr_df.to_excel(w, sheet_name="Rent Roll", index=False)
@@ -1123,35 +1150,26 @@ def main():
                 pd.DataFrame(cmt, columns=["Severity", "Topic", "Note"]).to_excel(w, sheet_name="Market Commentary", index=False)
                 pd.DataFrame([{"Key": k, "Value": v} for k,v in FINANCIAL_CONVENTIONS.items()]).to_excel(w, sheet_name="Conventions", index=False)
                 pd.DataFrame([{"Version": VERSION, "State Hash": h_pre, "Export Date": datetime.now().isoformat()}]).to_excel(w, sheet_name="Metadata", index=False)
-                
-                try:
-                    with DatabaseManager.get_conn() as conn:
-                        ad = pd.read_sql_query("SELECT * FROM audit_log WHERE deal_id=? ORDER BY timestamp DESC", conn, params=(s.deal_id,))
-                        docs = pd.read_sql_query("SELECT id, filename, category, size, is_encrypted, uploaded_at FROM documents WHERE deal_id=?", conn, params=(s.deal_id,))
-                    ad.to_excel(w, sheet_name="Audit Log", index=False)
-                    docs.to_excel(w, sheet_name="Doc Inventory", index=False)
-                except sqlite3.Error: pass
-
             c1.download_button("Download Excel Workbook", xl_out.getvalue(), f"{s.deal_id}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             
         enc_j = c2.checkbox("Encrypt JSON")
         pwd = c2.text_input("Password", type="password") if enc_j else ""
         if not enc_j or (enc_j and pwd):
-            state_dict = get_current_state()
+            state_dict = current_state
             if enc_j and DEPS["crypto"]: j_dat = json.dumps({"_alenza_storage": "encrypted", "payload": encrypt_text(json.dumps(state_dict, default=str), pwd)})
             else: j_dat = json.dumps({"_alenza_storage": "plain", "payload": json.dumps(state_dict, default=str)})
             c2.download_button("Download JSON", j_dat, f"{s.deal_id}.json")
             
         pdf_b = None
         if DEPS["pdf"]:
-            pdf_b = generate_pdf_memo(get_current_state(), out['L'], out['gate'], out['act_ltv'], out['act_dscr'], out['req_equity'], out['rets']['IRR'], out['c_stack'], flags, cmt, v_err, v_warn, h_pre)
+            pdf_b = generate_pdf_memo(current_state, out['L'], out['gate'], out['act_ltv'], out['act_dscr'], out['req_equity'], out['rets']['IRR'], out['c_stack'], flags, cmt, v_err, v_warn, h_pre)
             if pdf_b: c3.download_button("Download PDF Memo", pdf_b, f"{s.deal_name}.pdf", "application/pdf")
             
         inc_docs = c1.checkbox("Include vault documents in ZIP")
         if c1.button("Prepare Complete ZIP Package"):
             z_buf = io.BytesIO()
             with zipfile.ZipFile(z_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                zf.writestr("deal.json", json.dumps(get_current_state(), default=str))
+                zf.writestr("deal.json", json.dumps(current_state, default=str))
                 zf.writestr("amort.csv", out['amort_df'].to_csv(index=False))
                 zf.writestr("proforma.csv", out['pf_df'].to_csv(index=False))
                 zf.writestr("rent_roll.csv", rr_df.to_csv(index=False))
@@ -1194,14 +1212,11 @@ def main():
     # TAB 10: QA
     with tabs[9]:
         st.subheader("System Health & Validation")
-        st.info("Local SQLite and documents are stored on the app filesystem. Unencrypted at rest unless configured otherwise. Host persistence varies by cloud provider.")
         for e in v_err: st.error(e)
         for w in v_warn: st.warning(w)
         if not v_err and not v_warn: st.success("All validations passed.")
-        
-        st.write("Financial Exact-Value Tests")
         st.dataframe(ValidationEngine.run_financial_self_tests(), hide_index=True, use_container_width=True)
-        
+
         st.write("Version Rollback")
         v_df = DatabaseManager.get_versions(s.deal_id)
         if not v_df.empty:
