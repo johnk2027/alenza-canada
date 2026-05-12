@@ -1145,11 +1145,26 @@ def main():
                 out['amort_df'].to_excel(w, sheet_name="Amortization", index=False)
                 SensitivityEngine.proceeds_heatmap(s.noi, s.appraisal, s.purchase_price, s.closing_costs, s.reserves, s.fees, s.rate, s.amort, s.term, s.is_io, s.target_ltv, s.target_ltc, s.target_dscr, s.target_dy).to_excel(w, sheet_name="Sensitivity", index=False)
                 comps.to_excel(w, sheet_name="Market Comps", index=False)
-                pd.DataFrame({"Errors": v_err, "Warnings": v_warn}).to_excel(w, sheet_name="Validation", index=False)
+                
+                # FLATTENED VALIDATION LIST FOR PROPER EXCEL EXPORT
+                val_data = [{"Type": "Error", "Message": e} for e in v_err] + [{"Type": "Warning", "Message": w} for w in v_warn]
+                if not val_data:
+                    val_data = [{"Type": "Status", "Message": "All validations passed."}]
+                pd.DataFrame(val_data).to_excel(w, sheet_name="Validation", index=False)
+                
                 if latest: pd.DataFrame([latest]).to_excel(w, sheet_name="Canada Intel", index=False)
                 pd.DataFrame(cmt, columns=["Severity", "Topic", "Note"]).to_excel(w, sheet_name="Market Commentary", index=False)
                 pd.DataFrame([{"Key": k, "Value": v} for k,v in FINANCIAL_CONVENTIONS.items()]).to_excel(w, sheet_name="Conventions", index=False)
                 pd.DataFrame([{"Version": VERSION, "State Hash": h_pre, "Export Date": datetime.now().isoformat()}]).to_excel(w, sheet_name="Metadata", index=False)
+                
+                try:
+                    with DatabaseManager.get_conn() as conn:
+                        ad = pd.read_sql_query("SELECT * FROM audit_log WHERE deal_id=? ORDER BY timestamp DESC", conn, params=(s.deal_id,))
+                        docs = pd.read_sql_query("SELECT id, filename, category, size, is_encrypted, uploaded_at FROM documents WHERE deal_id=?", conn, params=(s.deal_id,))
+                    ad.to_excel(w, sheet_name="Audit Log", index=False)
+                    docs.to_excel(w, sheet_name="Doc Inventory", index=False)
+                except sqlite3.Error: pass
+
             c1.download_button("Download Excel Workbook", xl_out.getvalue(), f"{s.deal_id}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             
         enc_j = c2.checkbox("Encrypt JSON")
