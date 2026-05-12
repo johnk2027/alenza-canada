@@ -663,7 +663,7 @@ class DatabaseManager:
 # =============================================================================
 # 9. MARKET INTELLIGENCE & APIs (Degraded Mode Aware)
 # =============================================================================
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=30)
 def fetch_boc_history(days=365) -> Tuple[dict, pd.DataFrame, bool]:
     sm = {"FXUSDCAD": "USD/CAD", "BD.CDN.2YR.DQ.YLD": "2Y Yield", "BD.CDN.5YR.DQ.YLD": "5Y Yield", "BD.CDN.10YR.DQ.YLD": "10Y Yield", "V122514": "Overnight Target"}
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0", "Accept": "application/json"}
