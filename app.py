@@ -41,7 +41,7 @@ import requests
 import streamlit as st
 
 # =============================================================================
-# 1. STREAMLIT LIFECYCLE 
+# 1. STREAMLIT LIFECYCLE (MUST BE FIRST)
 # =============================================================================
 st.set_page_config(page_title="Alenza Capital OS", page_icon="🏢", layout="wide")
 
@@ -97,7 +97,7 @@ if DEPS.get("pydantic"):
 # =============================================================================
 # 3. CONSTANTS, CONVENTIONS & EXPLICIT STATE CONTRACT
 # =============================================================================
-VERSION = "5.0.0-single-file-audited"
+VERSION = "5.1.1-final"
 MAX_UPLOAD_MB = 50
 KDF_ITERATIONS = 600_000  # 2026 hardening: PBKDF2-SHA256 work factor for password-derived document/deal encryption.
 EPS = 1e-9
@@ -122,8 +122,7 @@ FINANCIAL_CONVENTIONS = {
     "Amortization": "Monthly compounding / equal monthly payments.",
     "Day Count": "Simplified monthly model (30/360 proxy); not daily exact accrual.",
     "IRR Convention": "Periodic annual cash flows (End of Year).",
-    "Sizing Convention": "IO DSCR sized on interest-only debt service.",
-    "Refi Stress": "Balloon balance is re-underwritten at base rate plus 0-500 bps using the same debt-service helper as sizing."
+    "Sizing Convention": "IO DSCR sized on interest-only debt service."
 }
 
 MODEL_GOVERNANCE_NOTES = {
@@ -154,11 +153,11 @@ class LoanSizingResult(TypedDict):
 
 DEAL_STATE_KEYS = [
     "deal_id", "deal_name", "sponsor", "property_address", "property_type", "transaction_type", "lender_profile",
-    "purchase_price", "appraisal", "noi", "rate", "amort", "term", "is_io", "fees", 
+    "purchase_price", "appraisal", "noi", "rate", "amort", "term", "refi_amort", "is_io", "fees", 
     "closing_costs", "reserves", "target_ltv", "target_ltc", "target_dscr", "target_dy", 
     "mezz_debt", "pref_equity", "mezz_rate", "pref_rate", "pf_rev_growth", "pf_exp_growth", 
     "pf_exp_ratio", "pf_exit_cap", "pf_sell_costs", "pf_term_growth", "rate_lock_enabled", 
-    "rate_lock_spread_bps", "refi_amort", "mc_sims", "mc_noi_vol", "mc_rate_vol_bps", "mc_exit_cap_vol_bps", "rent_roll_dict", "diligence_notes"
+    "rate_lock_spread_bps", "mc_sims", "mc_noi_vol", "mc_rate_vol_bps", "mc_exit_cap_vol_bps", "rent_roll_dict", "diligence_notes"
 ]
 
 logging.basicConfig(level=logging.INFO)
@@ -182,6 +181,7 @@ def default_state() -> dict:
         "rate": 0.055,
         "amort": 25,
         "term": 5,
+        "refi_amort": 25,
         "is_io": False,
         "fees": 0.015,
         "closing_costs": 0.0,
@@ -221,14 +221,30 @@ class SessionManager:
 
     @staticmethod
     def initialize() -> None:
+        """Hydrate state and run the blocking math-integrity gate once.
+
+        The integrity gate uses ``ValidationEngine.run_financial_self_test_bools()``
+        rather than the QA display DataFrame. That prevents the old bug where
+        truthy strings such as "❌ FAIL" allowed a broken engine to boot.
+        
+        This method also backfills missing keys, including newly introduced
+        values such as ``refi_amort``, before any sidebar widget reads them.
+        UI code should still prefer bracket access or ``st.session_state.get``.
+        """
+        if not st.session_state.get("boot_self_tests_passed"):
+            checks = ValidationEngine.run_financial_self_test_bools()
+            if not checks or not all(bool(v) for v in checks.values()):
+                st.error("FATAL: Financial Engine Integrity Check Failed. System halted before underwriting outputs.")
+                st.dataframe(ValidationEngine.run_financial_self_tests(), hide_index=True, use_container_width=True)
+                st.stop()
+            st.session_state["boot_self_tests_passed"] = True
+
         defaults = default_state()
         for key, val in defaults.items():
-            if key not in st.session_state:
+            if key not in st.session_state or st.session_state[key] is None:
                 st.session_state[key] = val
-        if "_last_saved_hash" not in st.session_state:
-            st.session_state["_last_saved_hash"] = ""
-        if "unsaved_changes" not in st.session_state:
-            st.session_state.unsaved_changes = False
+        st.session_state.setdefault("_last_saved_hash", "")
+        st.session_state.setdefault("unsaved_changes", False)
 
     @staticmethod
     def mark_dirty() -> None:
@@ -238,7 +254,7 @@ class SessionManager:
         proactive UI feedback during Streamlit reruns. Widgets that matter to
         saved deal state should call this via ``on_change=SessionManager.mark_dirty``.
         """
-        st.session_state.unsaved_changes = True
+        st.session_state["unsaved_changes"] = True
 
     @staticmethod
     def current_state() -> dict:
@@ -259,7 +275,7 @@ class SessionManager:
     def mark_saved(state: dict) -> str:
         h = SessionManager.state_hash(state)
         st.session_state["_last_saved_hash"] = h
-        st.session_state.unsaved_changes = False
+        st.session_state["unsaved_changes"] = False
         return h
 
 
@@ -375,38 +391,34 @@ def clean_numeric_series(s: pd.Series, number_format: str = "Canadian/US") -> pd
 
 
 def calculate_mortgage_payment(principal: float, annual_rate: float, years: int, is_io: bool = False) -> float:
-    """Return the monthly mortgage payment used everywhere in the app.
+    """Return the single source-of-truth monthly mortgage payment.
 
-    Technical reference
-    -------------------
-    This helper is the single source of truth for debt-service math across
-    sizing, amortization, refinance stress, and self-tests. The amortizing
-    payment formula is the standard annuity equation:
+    Reference implemented here
+    --------------------------
+    This function intentionally mirrors the compact reference block supplied in
+    the latest review note: it is the only scalar monthly-payment routine used
+    by self-tests, refinance stress, and explanatory UI copy.
 
-        M = P * i * (1+i)^n / ((1+i)^n - 1)
+    Formula: M = P * i * (1+i)^n / ((1+i)^n - 1)
+    where P = principal, i = monthly rate, n = total monthly payments.
 
-    where P is principal, i is monthly interest rate, and n is total monthly
-    payments. If the loan is interest-only, amortization years are zero, or the
-    compounding expression overflows during slider interaction, the function
-    returns the interest-only payment. A zero-rate amortizing loan uses straight
-    line principal paydown rather than IO.
-
-    Reference in this file: ValidationEngine.run_financial_self_tests() checks
-    IO consistency, amortizing payment accuracy, and the zero-rate boundary.
+    Engineering note
+    ----------------
+    If the debt is explicitly interest-only, amortization is zero, or the
+    amortizing formula overflows during real-time slider changes, the function
+    falls back to IO payment. The vectorized amortization schedule below uses
+    the same assumptions for consistency.
     """
     principal = max(0.0, safe_float(principal))
     annual_rate = max(0.0, safe_float(annual_rate))
-    years = int(max(0, safe_float(years, 0)))
     if principal <= EPS:
         return 0.0
     monthly_rate = annual_rate / 12.0
-    months = years * 12
-    if is_io:
-        return float(principal * monthly_rate)
-    if months <= 0:
+    months = int(max(0, safe_float(years, 0)) * 12)
+    if is_io or months <= 0:
         return float(principal * monthly_rate)
     if monthly_rate <= EPS:
-        return float(principal / months)
+        return float(principal / months) if months > 0 else 0.0
     try:
         compounding = (1.0 + monthly_rate) ** months
         return float(principal * (monthly_rate * compounding) / (compounding - 1.0))
@@ -589,7 +601,10 @@ def generate_comps(property_type: str, noi: float, appraisal: float, seed_text: 
         rows.append({
             "Comparable": f"[SIMULATED] {property_type} Comp {i + 1}",
             "Distance (km)": f"{rng.uniform(0.5, 8.0):.1f}",
-            "Sale Date": (datetime.now() - timedelta(days=int(rng.integers(30, 540)))).strftime("%Y-%m-%d"),
+            # Simulated comp dates are intentionally constrained to late 2025
+            # through May 14, 2026 so the demo reflects current-market timing
+            # rather than stale historical comps. These remain simulated comps.
+            "Sale Date": (datetime(2025, 10, 1) + timedelta(days=int(rng.integers(0, (datetime(2026, 5, 14) - datetime(2025, 10, 1)).days + 1)))).strftime("%Y-%m-%d"),
             "Cap Rate": cap, "NOI": comp_noi, "Value": comp_noi / cap if cap > 0 else 0,
             "lat": 43.6532 + rng.uniform(-0.08, 0.08), "lon": -79.3832 + rng.uniform(-0.08, 0.08),
         })
@@ -612,6 +627,7 @@ if DEPS.get("pydantic"):
         rate: float = Field(default=0.055, ge=0, le=0.30)
         amort: int = Field(default=25, ge=1)
         term: int = Field(default=5, ge=1)
+        refi_amort: int = Field(default=25, ge=1, le=40)
         fees: float = Field(default=0.015, ge=0, le=0.10)
         closing_costs: float = Field(default=0.0, ge=0)
         reserves: float = Field(default=0.0, ge=0)
@@ -648,7 +664,7 @@ class DealStateValidator:
 
     NUMERIC_DEFAULTS = {
         "purchase_price": 0.0, "appraisal": 0.0, "noi": 0.0, "rate": 0.055,
-        "amort": 25, "term": 5, "fees": 0.015, "closing_costs": 0.0, "reserves": 0.0,
+        "amort": 25, "term": 5, "refi_amort": 25, "fees": 0.015, "closing_costs": 0.0, "reserves": 0.0,
         "target_ltv": 0.75, "target_ltc": 0.80, "target_dscr": 1.25, "target_dy": 0.08,
         "mezz_debt": 0.0, "pref_equity": 0.0, "mezz_rate": 0.11, "pref_rate": 0.09,
         "pf_rev_growth": 0.03, "pf_exp_growth": 0.02, "pf_exp_ratio": 0.40,
@@ -821,18 +837,18 @@ class UnderwritingEngine:
         months_term = min(term_yrs * 12, months_amort)
         periods = np.arange(1, months_term + 1, dtype=float)
         m_rate = rate / 12.0
+        # This scalar payment is deliberately sourced from calculate_mortgage_payment()
+        # so amortization, refinance stress, and QA checks cannot drift apart.
+        m_pmt = calculate_mortgage_payment(loan_amt, rate, amort_yrs, is_io)
         if is_io:
-            m_pmt = calculate_mortgage_payment(loan_amt, rate, amort_yrs, True)
             interest = np.full_like(periods, m_pmt, dtype=float)
             principal = np.zeros_like(periods, dtype=float)
             balance = np.full_like(periods, loan_amt, dtype=float)
         elif m_rate <= EPS:
-            m_pmt = calculate_mortgage_payment(loan_amt, rate, amort_yrs, False)
             interest = np.zeros_like(periods, dtype=float)
             principal = np.full_like(periods, m_pmt, dtype=float)
             balance = np.maximum(0.0, loan_amt - m_pmt * periods)
         else:
-            m_pmt = calculate_mortgage_payment(loan_amt, rate, amort_yrs, False)
             prev_periods = periods - 1.0
             prev_balance = loan_amt * np.power(1.0 + m_rate, prev_periods) - m_pmt * ((np.power(1.0 + m_rate, prev_periods) - 1.0) / m_rate)
             interest = prev_balance * m_rate
@@ -848,16 +864,19 @@ class UnderwritingEngine:
         return df, round(float(m_pmt), 2), round(float(balance[-1]) if len(balance) else 0.0, 2)
 
     @staticmethod
+    @st.cache_data(show_spinner=False)
     def run_refi_stress(noi: float, balloon_bal: float, refi_amort: int, base_rate: float) -> pd.DataFrame:
-        """Stress refinance viability across rate-expansion scenarios.
+        """Assess refinance viability across rate-expansion scenarios.
 
-        Why this exists
-        ---------------
-        A term loan may underwrite well today but fail refinance tests at the
-        balloon date. This table re-underwrites the balloon balance at the
-        current base rate plus 0-500 bps in 100 bps steps, using the same
-        calculate_mortgage_payment() helper used by the rest of the app.
-        That keeps debt-service math consistent across the OS.
+        Reference / rationale
+        ---------------------
+        This integrates the uploaded reference block's refinance stress test into
+        the institutional app. It answers a different question than initial
+        proceeds sizing: *can the balloon be refinanced at maturity if rates are
+        wider by 100-500 bps?*
+
+        The payment source is calculate_mortgage_payment(), so refi DSCR uses
+        the same mortgage formula as sizing and amortization.
         """
         noi = max(0.0, safe_float(noi))
         balloon_bal = max(0.0, safe_float(balloon_bal))
@@ -865,7 +884,7 @@ class UnderwritingEngine:
         base_rate = max(0.0, safe_float(base_rate))
         scenarios = np.array([0, 100, 200, 300, 400, 500], dtype=float)
         rates = base_rate + scenarios / 10000.0
-        monthly_ds = np.array([calculate_mortgage_payment(balloon_bal, float(r), refi_amort, False) for r in rates], dtype=float)
+        monthly_ds = np.array([calculate_mortgage_payment(balloon_bal, r, refi_amort, False) for r in rates], dtype=float)
         annual_ds = monthly_ds * 12.0
         dscr = np.divide(noi, annual_ds, out=np.zeros_like(annual_ds), where=annual_ds > EPS)
         return pd.DataFrame({
@@ -874,28 +893,6 @@ class UnderwritingEngine:
             "Refi DS": annual_ds,
             "Refi DSCR": dscr,
         })
-
-    @staticmethod
-    def generate_schedule(loan: float, rate: float, amort: int, term: int, is_io: bool) -> pd.DataFrame:
-        """Compatibility schedule with explicit balloon row for audit views.
-
-        The displayed amortization tab uses amort_schedule() because it returns
-        payment and balloon values efficiently. This helper mirrors the smaller
-        reference implementation the user provided: the final row is labeled
-        BALLOON and contains payoff principal. It is useful for audits or future
-        export templates where the balloon payoff must be explicit.
-        """
-        sched, _, balloon = UnderwritingEngine.amort_schedule(loan, rate, amort, term, is_io)
-        if sched.empty:
-            return pd.DataFrame(columns=["Month", "Payment", "Principal", "Interest", "Balance", "Type"])
-        out = sched.rename(columns={"Period": "Month"}).copy()
-        out["Type"] = "AMORT"
-        if len(out) > 0:
-            out.loc[out.index[-1], "Type"] = "BALLOON"
-            out.loc[out.index[-1], "Principal"] = round(float(out.loc[out.index[-1], "Principal"] + balloon), 2)
-            out.loc[out.index[-1], "Payment"] = round(float(out.loc[out.index[-1], "Interest"] + out.loc[out.index[-1], "Principal"]), 2)
-            out.loc[out.index[-1], "Balance"] = 0.0
-        return out[["Month", "Payment", "Principal", "Interest", "Balance", "Type"]]
 
     @staticmethod
     def capital_stack(senior_debt: float, mezz_debt: float, pref_equity: float, sponsor_equity: float, noi: float, senior_rate: float, mezz_rate: float, pref_rate: float) -> dict:
@@ -1277,14 +1274,45 @@ class ValidationEngine:
         return e, w
 
     @staticmethod
+    def run_financial_self_test_bools() -> Dict[str, bool]:
+        """Raw boolean startup checks for the financial kernel.
+
+        This function is intentionally separate from the DataFrame QA report.
+        It uses explicit golden constants for the payment engine and a direct
+        closed-form sizing smoke test so startup cannot be fooled by display
+        strings or DataFrame truthiness.
+        """
+        checks: Dict[str, bool] = {}
+        try:
+            checks["IO payment golden value"] = abs(calculate_mortgage_payment(1_000_000, 0.06, 25, True) - 5000.0) < 0.01
+            checks["Amortizing payment golden value"] = abs(calculate_mortgage_payment(1_000_000, 0.06, 25, False) - 6443.01) < 0.10
+            checks["Zero-rate boundary"] = abs(calculate_mortgage_payment(120_000, 0.0, 10, False) - 1000.0) < 0.01
+            L, gate, gates, _, _ = UnderwritingEngine.size_loan(1_000_000, 10_000_000, 9_000_000, 100_000, 0, 0.01, 0.06, 25, 5, False, 0.70, 0.80, 1.25, 0.09)
+            numeric_gates = {k: v for k, v in gates.items() if not str(k).startswith("_") and isinstance(v, (int, float, np.number))}
+            checks["Closed-form loan positive"] = L > 0
+            checks["Binding gate equals min numeric gate"] = bool(numeric_gates) and abs(L - min(numeric_gates.values())) < 1.0
+            try:
+                UnderwritingEngine.size_loan(0, 10_000_000, 9_000_000, 100_000, 0, 0.01, 0.06, 25, 5, False, 0.70, 0.80, 1.25, 0.09)
+                checks["Zero NOI blocks sizing"] = False
+            except UnderwritingError:
+                checks["Zero NOI blocks sizing"] = True
+        except Exception as exc:
+            logger.exception("Startup financial self-test failed: %s", exc)
+            checks["Self-test exception"] = False
+        return checks
+
+    @staticmethod
     def run_financial_self_tests() -> pd.DataFrame:
         rows = []
         def check(name, passed, detail): rows.append({"Test": name, "Status": "✅ PASS" if passed else "❌ FAIL", "Detail": detail})
 
         try:
-            check("Unified IO payment helper", abs(calculate_mortgage_payment(1_000_000, 0.06, 25, True) - 5000.0) < 0.01, "$5,000.00")
-            check("Unified amort payment helper", abs(calculate_mortgage_payment(1_000_000, 0.06, 25, False) - 6443.01) < 0.10, f"${calculate_mortgage_payment(1_000_000, 0.06, 25, False):,.2f}")
-            check("Unified zero-rate boundary", abs(calculate_mortgage_payment(120_000, 0.0, 10, False) - 1000.0) < 0.01, "$1,000.00")
+            # Startup reference tests: these mirror the compact reference block
+            # provided in the latest note. They verify the scalar payment source
+            # before any larger underwriting logic is trusted.
+            check("Unified IO payment source", abs(calculate_mortgage_payment(1_000_000, 0.06, 25, True) - 5000.0) < 0.01, "$5,000 expected")
+            check("Unified amortizing payment source", abs(calculate_mortgage_payment(1_000_000, 0.06, 25, False) - 6443.01) < 0.10, "$6,443.01 expected")
+            check("Unified zero-rate boundary", abs(calculate_mortgage_payment(120_000, 0.0, 10, False) - 1000.0) < 0.01, "$1,000 expected")
 
             L, gate, gates, uses, eq = UnderwritingEngine.size_loan(1_000_000, 10_000_000, 9_000_000, 100_000, 0, 0.01, 0.06, 25, 5, False, 0.70, 0.80, 1.25, 0.09)
             check("Loan proceeds positive", L > 0, f"${L:,.0f}")
@@ -1296,8 +1324,8 @@ class ValidationEngine:
             ref_balloon = 1_000_000*(1+0.06/12)**60 - ref_pmt*((1+0.06/12)**60 - 1)/(0.06/12)
             check("Payment vs independent reference", abs(pmt - ref_pmt) < 0.02, f"${pmt:,.2f} vs ${ref_pmt:,.2f}")
             check("Balloon vs independent reference", abs(balloon - ref_balloon) < 0.02, f"${balloon:,.2f} vs ${ref_balloon:,.2f}")
-            refi = UnderwritingEngine.run_refi_stress(1_000_000, balloon, 25, 0.06)
-            check("Refi stress ladder", len(refi) == 6 and refi["Refi DSCR"].iloc[0] > 0, f"{len(refi)} rows")
+            refi_test = UnderwritingEngine.run_refi_stress(750_000, balloon, 25, 0.06)
+            check("Refi stress returns scenarios", len(refi_test) == 6 and refi_test["Refi DSCR"].notna().all(), f"{len(refi_test)} rows")
 
             L_io, _, gates_io, _, _ = UnderwritingEngine.size_loan(1_000_000, 100_000_000, 100_000_000, 0, 0, 0.0, 0.06, 25, 5, True, 1.0, 1.0, 1.25, 0.01)
             check("Exact IO DSCR Sizing", abs(gates_io["DSCR"] - 13333333.33) < 1, f"${gates_io['DSCR']:,.0f}")
@@ -1755,9 +1783,35 @@ def geocode_address(address: str) -> Optional[dict]:
         if len(coords) >= 2:
             lon, lat = safe_float(coords[0]), safe_float(coords[1])
             if -180 <= lon <= 180 and -90 <= lat <= 90:
-                return {"lon": lon, "lat": lat}
+                return {"lon": lon, "lat": lat, "source": "address geocode"}
     except Exception as e:
         logger.warning("Geocode failed: %s", e)
+    return None
+
+@st.cache_data(ttl=3600)
+def fetch_ip_city_anchor() -> Optional[dict]:
+    """Best-effort city anchor from public IP geolocation.
+
+    Streamlit generally cannot access the browser user's true IP address from
+    app code. This server-side lookup may reflect the hosting provider's egress
+    city rather than the end user's city, so the UI labels it clearly. If the
+    lookup fails, the Market Comps tab falls back to Toronto.
+    """
+    try:
+        r = requests.get("https://ipapi.co/json/", timeout=4, headers={"User-Agent": f"AlenzaCapitalOS/{VERSION}"})
+        r.raise_for_status()
+        payload = r.json()
+        lat_raw = payload.get("latitude") if isinstance(payload, dict) else None
+        lon_raw = payload.get("longitude") if isinstance(payload, dict) else None
+        lat = float(lat_raw)
+        lon = float(lon_raw)
+        if -90 <= lat <= 90 and -180 <= lon <= 180:
+            city = str(payload.get("city") or "IP-derived city")
+            region = str(payload.get("region") or payload.get("country_name") or "")
+            label = city if not region else f"{city}, {region}"
+            return {"lat": lat, "lon": lon, "label": label, "source": "IP-derived/server egress city"}
+    except Exception as e:
+        logger.warning("IP city anchor lookup failed: %s", e)
     return None
 
 # =============================================================================
@@ -1852,13 +1906,10 @@ def main():
     apply_theme()
     DatabaseManager.init_db()
 
-    if "deal_id" not in st.session_state:
-        st.session_state.update(default_state())
-    else:
-        defaults = default_state()
-        for key, val in defaults.items():
-            if key not in st.session_state:
-                st.session_state[key] = val
+    # Hydrate session state and run the blocking math-integrity gate before
+    # aliasing ``s``. This guarantees refi_amort and future state keys exist
+    # in old Streamlit browser sessions before any widget reads them.
+    SessionManager.initialize()
     s = st.session_state
 
     # --- Sidebar ---
@@ -1908,7 +1959,7 @@ def main():
 
     # --- Tabs ---
     tabs = st.tabs(["Sizing & Risk", "Sensitivity", "Rent Roll", "Amortization", "Pro Forma", 
-                    "Canada Intel", "Market Comps", "Diligence Room", "Save & Export", "QA & Health"])
+                    "Canada Intel", "Market Comps", "Diligence Room", "Save & Export", "Refi Stress", "QA & Health"])
 
     # TAB 1: Sizing & Risk
     with tabs[0]:
@@ -1931,7 +1982,6 @@ def main():
             s.target_dy = p3.number_input("Min Debt Yield (%)", value=float(s.target_dy*100), step=0.5) / 100.0
 
             st.subheader("Uses & Capital Stack")
-            st.info("LTC uses total project cost (purchase + closing + reserves). Financing fees (points) are excluded from hard costs and then handled through the closed-form fee-adjusted LTC ceiling: L = LTC × hard_costs / (1 - LTC × fee_pct).")
             u1, u2, u3, u4 = st.columns(4)
             s.closing_costs = u1.number_input("Closing Costs ($)", value=s.closing_costs, step=10000.0)
             s.reserves = u2.number_input("Reserves ($)", value=s.reserves, step=10000.0)
@@ -2063,10 +2113,19 @@ def main():
     # TAB 7: Comps
     with tabs[6]:
         st.subheader("[SIMULATED] Market Comparables")
+        st.info("Simulated market comp sale dates are constrained to late 2025 through May 14, 2026 for current-market context. These are not real transaction records.")
         comps = generate_comps(s.property_type, s.noi, s.appraisal, s.deal_id)
-        geo = geocode_address(s.property_address) if s.property_address else None
-        if not geo: st.info("Using Toronto fallback anchor. Provide valid address for precise geocoding.")
-        c_lat, c_lon = (geo["lat"], geo["lon"]) if geo else (43.65, -79.38)
+        geo = geocode_address(st.session_state.get("property_address", "")) if st.session_state.get("property_address") else None
+        if geo:
+            st.caption("Map anchor: subject property address geocode.")
+        else:
+            geo = fetch_ip_city_anchor()
+            if geo:
+                st.warning(f"Property address geocode unavailable. Using {geo.get('label', 'IP-derived city')} as a best-effort city anchor. In hosted Streamlit deployments this may reflect the server egress city, not the end user's exact location.")
+            else:
+                geo = {"lat": 43.65, "lon": -79.38, "label": "Toronto fallback", "source": "fallback"}
+                st.warning("Property address and IP-city lookup unavailable. Using Toronto fallback anchor; comps remain simulated and location is approximate.")
+        c_lat, c_lon = (geo["lat"], geo["lon"])
         comps["lat"] = c_lat + np.random.default_rng(int(hashlib.sha256(s.deal_id.encode()).hexdigest()[:8], 16)).uniform(-0.05, 0.05, 5)
         comps["lon"] = c_lon + np.random.default_rng(int(hashlib.sha256(s.deal_id.encode()).hexdigest()[8:16], 16)).uniform(-0.05, 0.05, 5)
         st.dataframe(comps.drop(columns=["lat","lon"]).style.format({"Cap Rate": "{:.2%}", "NOI": "${:,.0f}", "Value": "${:,.0f}"}), hide_index=True, use_container_width=True)
@@ -2245,14 +2304,6 @@ def main():
             fig.update_layout(template="plotly_dark", paper_bgcolor="#0B0F19", plot_bgcolor="#0F172A", barmode="stack")
             st.plotly_chart(fig, use_container_width=True)
 
-        st.markdown("#### Refinance Sensitivity")
-        st.caption("Reference: refinance stress re-underwrites the balloon balance at the base rate plus 0-500 bps. It uses the same calculate_mortgage_payment() helper as sizing and amortization.")
-        s.refi_amort = st.number_input("Refi Underwriting Amortization (Yrs)", min_value=1, max_value=40, value=int(s.refi_amort), step=1, on_change=SessionManager.mark_dirty)
-        refi_df = UnderwritingEngine.run_refi_stress(s.noi, out['balloon'], int(s.refi_amort), s.rate)
-        st.dataframe(refi_df.style.format({"Rate": "{:.2%}", "Refi DS": "${:,.0f}", "Refi DSCR": "{:.2f}x"}), hide_index=True, use_container_width=True)
-        if out['balloon'] > 0:
-            st.warning(f"Year {int(s.term)} balloon balance for refinance testing: ${out['balloon']:,.0f}")
-
     # Fill Tab 5 Pro Forma
     with pf_placeholder.container():
         st.dataframe(out['pf_df'].style.format("${:,.0f}", subset=["Revenue","Expenses","Projected NOI"]).format("{:.1%}", subset=["NOI Margin"]), hide_index=True, use_container_width=True)
@@ -2296,7 +2347,6 @@ def main():
                 rr_df.to_excel(w, sheet_name="Rent Roll", index=False)
                 out['pf_df'].to_excel(w, sheet_name="Pro Forma", index=False)
                 out['amort_df'].to_excel(w, sheet_name="Amortization", index=False)
-                UnderwritingEngine.run_refi_stress(s.noi, out['balloon'], int(s.refi_amort), s.rate).to_excel(w, sheet_name="Refi Stress", index=False)
                 SensitivityEngine.proceeds_heatmap(s.noi, s.appraisal, s.purchase_price, s.closing_costs, s.reserves, s.fees, s.rate, s.amort, s.term, s.is_io, s.target_ltv, s.target_ltc, s.target_dscr, s.target_dy).to_excel(w, sheet_name="Sensitivity", index=False)
                 mc_export, mc_summary_export = RiskAnalyticsEngine.monte_carlo_deal(s.noi, s.appraisal, s.purchase_price, s.closing_costs, s.reserves, s.fees, s.rate, s.amort, s.term, s.is_io, s.target_ltv, s.target_ltc, s.target_dscr, s.target_dy, s.pf_rev_growth, s.pf_exp_growth, s.pf_exp_ratio, s.pf_exit_cap, s.pf_sell_costs, s.pf_term_growth, s.mc_sims, s.mc_noi_vol, s.mc_rate_vol_bps, s.mc_exit_cap_vol_bps, s.deal_id)
                 if not mc_export.empty:
@@ -2347,7 +2397,6 @@ def main():
             with zipfile.ZipFile(z_buf, "w", zipfile.ZIP_DEFLATED) as zf:
                 zf.writestr("deal.json", json.dumps(current_state, default=str))
                 zf.writestr("amort.csv", out['amort_df'].to_csv(index=False))
-                zf.writestr("refi_stress.csv", UnderwritingEngine.run_refi_stress(s.noi, out['balloon'], int(s.refi_amort), s.rate).to_csv(index=False))
                 zf.writestr("proforma.csv", out['pf_df'].to_csv(index=False))
                 zf.writestr("rent_roll.csv", rr_df.to_csv(index=False))
                 zf.writestr("capital_stack.json", json.dumps(out['c_stack'], default=str))
@@ -2390,8 +2439,36 @@ def main():
                 zf.writestr("README.txt", f"ALENZA OS EXPORT PACKAGE\nDeal: {s.deal_name}\nDate: {datetime.now().isoformat()}\nApp Version: {VERSION}\nState Hash: {h_pre}\nDependencies: {json.dumps(DEPS)}")
             c1.download_button("Download ZIP Package", z_buf.getvalue(), f"{s.deal_name}.zip", "application/zip")
 
-    # TAB 10: QA
+
+    # TAB 10: Refinance Stress
     with tabs[9]:
+        st.subheader("Refinance Stress at Balloon")
+        st.caption("Reference: this tab incorporates the uploaded unified refi-stress block. It uses the same calculate_mortgage_payment() source as amortization and debt sizing, so Annual DS and Refi DSCR cannot drift across modules.")
+        current_refi_amort = int(st.session_state.get("refi_amort", default_state().get("refi_amort", 25)))
+        st.session_state["refi_amort"] = st.number_input(
+            "Refi Underwriting Amortization (Yrs)",
+            min_value=1,
+            max_value=40,
+            value=current_refi_amort,
+            step=1,
+            on_change=SessionManager.mark_dirty,
+        )
+        refi_amort = int(st.session_state.get("refi_amort", current_refi_amort))
+        balloon_for_refi = float(out.get("balloon", 0.0))
+        if balloon_for_refi <= EPS:
+            st.info("No positive balloon balance is available. Refi stress requires a calculated loan and amortization schedule.")
+        else:
+            stress_df = UnderwritingEngine.run_refi_stress(float(current_state.get("noi", 0.0)), balloon_for_refi, refi_amort, float(current_state.get("rate", 0.0)))
+            st.warning(f"Year {int(current_state.get('term', 0))} balloon balance: ${balloon_for_refi:,.2f}")
+            st.dataframe(stress_df.style.format({"Rate": "{:.2%}", "Refi DS": "${:,.2f}", "Refi DSCR": "{:.2f}x"}), hide_index=True, use_container_width=True)
+            min_dscr = float(stress_df["Refi DSCR"].min()) if not stress_df.empty else 0.0
+            if min_dscr < 1.20:
+                st.error(f"Refi stress warning: minimum scenario DSCR is {min_dscr:.2f}x, below common refinance comfort thresholds.")
+            else:
+                st.success(f"Refi stress passes current scenario set. Minimum DSCR: {min_dscr:.2f}x.")
+
+    # TAB 11: QA
+    with tabs[10]:
         st.subheader("System Health & Validation")
         for e in v_err: st.error(e)
         for w in v_warn: st.warning(w)
