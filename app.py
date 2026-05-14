@@ -1,7 +1,7 @@
 """
-Alenza Capital OS v4.5.1
-Single-file Streamlit CRE Underwriting Workstation.
-Features strict state contracts, cryptographic persistence, zero-latency state rendering, and exhaustive institutional exports.
+Alenza Capital OS
+Streamlit CRE Underwriting Workstation.
+
 """
 
 from __future__ import annotations
