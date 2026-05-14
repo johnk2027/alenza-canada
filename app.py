@@ -13,7 +13,7 @@ Model-governance note
 This is an underwriting decision-support tool, not a credit approval engine. It
 shows deterministic sizing gates, simulated market context, API-backed macro data
 when available, and Monte Carlo stress analytics. Any final credit decision should
-be supported by source documents, lender policy, and professional judgment.
+be supported by source documents, lender policy, etc. 
 """
 
 from __future__ import annotations
@@ -97,7 +97,7 @@ if DEPS.get("pydantic"):
 # =============================================================================
 # 3. CONSTANTS, CONVENTIONS & EXPLICIT STATE CONTRACT
 # =============================================================================
-VERSION = "5.1.1-final"
+VERSION = "5.2.1-final-bootgate"
 MAX_UPLOAD_MB = 50
 KDF_ITERATIONS = 600_000  # 2026 hardening: PBKDF2-SHA256 work factor for password-derived document/deal encryption.
 EPS = 1e-9
@@ -682,6 +682,9 @@ class DealStateValidator:
         "mc_noi_vol": (0.0, 0.50), "mc_rate_vol_bps": (0.0, 500.0), "mc_exit_cap_vol_bps": (0.0, 500.0),
     }
 
+    # Section 7 completion sentinel:
+    # RATIO_BOUNDS is intentionally closed above. coerce() below is the bridge
+    # from raw Streamlit/session values into the Section 8 underwriting kernel.
     @classmethod
     def coerce(cls, state: dict) -> Tuple[dict, List[str]]:
         clean = dict(state)
@@ -712,6 +715,9 @@ class DealStateValidator:
             clean[key] = val
         clean["mc_sims"] = int(min(max(clean.get("mc_sims", 2000), 100), 25000))
         return clean, notes
+
+# --- END SECTION 7: DealStateValidator is complete. ---
+# Section 8 below is the deterministic mathematical sizing kernel.
 
 class UnderwritingEngine:
     @staticmethod
@@ -929,6 +935,42 @@ class UnderwritingEngine:
         noi, occ, ann_ds = safe_float(noi), safe_float(occ), safe_float(ann_ds)
         if noi <= 0 or occ <= 0 or ann_ds <= 0: return 0.0
         return min(1.5, max(0.0, ann_ds / noi * occ))
+
+
+@st.cache_data(show_spinner=False)
+def run_loan_sizing(s: Dict[str, Any]) -> LoanSizingResult:
+    """Deterministic four-gate sizing wrapper used by UI/export code.
+
+    This is the Section 8 bridge requested in the audit notes: callers pass a
+    single state dictionary, the validator coerces/bounds the values, and the
+    mathematical kernel evaluates LTV, fee-adjusted LTC, DSCR and Debt Yield.
+
+    Why this wrapper exists
+    -----------------------
+    The lower-level ``UnderwritingEngine.size_loan`` remains scalar and explicit
+    for self-tests and backward compatibility. This wrapper is the readable
+    app-level contract that returns a ``LoanSizingResult`` TypedDict, matching
+    the documented output shape and avoiding 14 positional arguments at UI call
+    sites.
+    """
+    clean, validator_notes = DealStateValidator.coerce(dict(s))
+    loan, gate, gates, uses, _gross_equity = UnderwritingEngine.size_loan(
+        clean["noi"], clean["appraisal"], clean["purchase_price"],
+        clean["closing_costs"], clean["reserves"], clean["fees"],
+        clean["rate"], clean["amort"], clean["term"], clean["is_io"],
+        clean["target_ltv"], clean["target_ltc"], clean["target_dscr"], clean["target_dy"],
+    )
+    if validator_notes:
+        gates.setdefault("_messages", [])
+        gates["_messages"].extend(validator_notes)
+    subordinate_capital = clean.get("mezz_debt", 0.0) + clean.get("pref_equity", 0.0)
+    return {
+        "loan": float(loan),
+        "binding_gate": str(gate),
+        "gates": gates,
+        "total_uses": float(uses),
+        "required_equity": max(0.0, float(uses) - float(loan) - float(subordinate_capital)),
+    }
 
 class InvestmentEngine:
     @staticmethod
@@ -1295,6 +1337,66 @@ def get_simulation_summary(df: pd.DataFrame) -> Dict[str, Any]:
         "Avg Yield on Cost": float(df[yoc_col].mean()) if yoc_col in df.columns else 0.0,
         "Risk of Default": f"{float((df[dscr_col] < 1.0).mean()) * 100:.1f}%" if dscr_col in df.columns else "0.0%",
     }
+
+
+class RiskEngine:
+    """Readable Monte Carlo facade for reviewer-facing 100/2,000 point backtests.
+
+    The heavy lifting remains in ``RiskAnalyticsEngine.monte_carlo_deal``, which is
+    vectorized with NumPy. This wrapper simply converts the existing column names
+    into a compact, memo-friendly schema so the UI and exports can talk about
+    ``Result_DSCR`` and ``Result_EM`` without duplicating stochastic math.
+    
+    Reference: this section implements the user's requested Section 10 pattern,
+    but avoids reintroducing a Python loop over simulations.
+    """
+
+    @staticmethod
+    @st.cache_data(show_spinner="Running stochastic risk backtest...")
+    def run_simulation(state: Dict[str, Any], sized_loan: float, iterations: Optional[int] = None) -> pd.DataFrame:
+        s, _notes = DealStateValidator.coerce(dict(state))
+        n_sims = int(iterations or s.get("mc_sims", 2000))
+        df, _summary = RiskAnalyticsEngine.monte_carlo_deal(
+            s["noi"], s["appraisal"], s["purchase_price"], s["closing_costs"], s["reserves"], s["fees"], s["rate"],
+            s["amort"], s["term"], s["is_io"], s["target_ltv"], s["target_ltc"], s["target_dscr"], s["target_dy"],
+            s["pf_rev_growth"], s["pf_exp_growth"], s["pf_exp_ratio"], s["pf_exit_cap"], s["pf_sell_costs"],
+            s["pf_term_growth"], n_sims, s["mc_noi_vol"], s["mc_rate_vol_bps"], s["mc_exit_cap_vol_bps"],
+            str(s.get("deal_id", "risk_engine")),
+        )
+        if df.empty:
+            return pd.DataFrame(columns=["Sim_NOI", "Sim_Rate", "Sim_Exit_Cap", "Result_DSCR", "Result_EM"])
+
+        # Result_EM is mapped from the engine's equity multiple column when present.
+        # If the underlying model cannot compute EM, we keep NaN rather than
+        # inventing a zero and making the risk look safer than it is.
+        return pd.DataFrame({
+            "Sim_NOI": df.get("NOI", pd.Series(dtype=float)),
+            "Sim_Rate": df.get("Rate", pd.Series(dtype=float)),
+            "Sim_Exit_Cap": df.get("Exit Cap", pd.Series(dtype=float)),
+            "Result_DSCR": df.get("DSCR", pd.Series(dtype=float)),
+            "Result_EM": df.get("EM", pd.Series(np.nan, index=df.index)),
+            "Loan_Amount": df.get("Mortgage", pd.Series(sized_loan, index=df.index)),
+        })
+
+    @staticmethod
+    def get_risk_metrics(df: pd.DataFrame) -> Dict[str, float]:
+        if df is None or df.empty:
+            return {
+                "Prob. DSCR < 1.0": 0.0,
+                "Prob. Principal Loss (EM < 1.0)": 0.0,
+                "95th Percentile EM": float("nan"),
+                "5th Percentile EM": float("nan"),
+                "Median DSCR": 0.0,
+            }
+        dscr = pd.to_numeric(df.get("Result_DSCR"), errors="coerce")
+        em = pd.to_numeric(df.get("Result_EM"), errors="coerce")
+        return {
+            "Prob. DSCR < 1.0": float((dscr < 1.0).mean()) if not dscr.empty else 0.0,
+            "Prob. Principal Loss (EM < 1.0)": float((em < 1.0).mean()) if em.notna().any() else float("nan"),
+            "95th Percentile EM": float(em.quantile(0.95)) if em.notna().any() else float("nan"),
+            "5th Percentile EM": float(em.quantile(0.05)) if em.notna().any() else float("nan"),
+            "Median DSCR": float(dscr.median()) if dscr.notna().any() else 0.0,
+        }
 
 class ValidationEngine:
     @staticmethod
@@ -1818,6 +1920,118 @@ def build_market_commentary(boc_latest, unemp_data, vac_data, state):
             cmt.append(("medium", "High Asset Vacancy", f"Nat avg {row['National Vacancy'].iloc[0]:.1f}%."))
     return cmt
 
+
+class MacroBridge:
+    """Stale-while-revalidate macro benchmark bridge.
+
+    The workstation already uses Bank of Canada data for Canadian context. This
+    bridge adds optional FRED series support (for example DGS10 and SOFR) without
+    making the app dependent on a FRED key. If no key exists, it returns a clearly
+    labeled fallback so UI code can continue to run.
+    """
+
+    @staticmethod
+    def _get_secret(name: str) -> Optional[str]:
+        try:
+            return st.secrets.get(name)
+        except Exception:
+            return os.environ.get(name)
+
+    @staticmethod
+    @st.cache_data(ttl=86400, show_spinner=False)
+    def fetch_benchmark(series_id: str = "DGS10") -> Tuple[float, str, bool]:
+        api_key = MacroBridge._get_secret("FRED_API_KEY")
+        fallback = {"DGS10": 0.0425, "SOFR": 0.0435}.get(str(series_id).upper(), 0.0425)
+        if not api_key:
+            return fallback, "Manual fallback - set FRED_API_KEY for live data", True
+        try:
+            url = "https://api.stlouisfed.org/fred/series/observations"
+            params = {
+                "series_id": series_id,
+                "api_key": api_key,
+                "file_type": "json",
+                "sort_order": "desc",
+                "limit": 10,
+            }
+            response = requests.get(url, params=params, timeout=8)
+            response.raise_for_status()
+            observations = response.json().get("observations", [])
+            for obs in observations:
+                raw = str(obs.get("value", ".")).strip()
+                if raw and raw != ".":
+                    return float(raw) / 100.0, str(obs.get("date", "Unknown")), False
+            return fallback, "FRED returned no numeric observation", True
+        except Exception as exc:
+            logger.warning("FRED API error for %s: %s", series_id, exc)
+            return fallback, "FRED connection error fallback", True
+
+    @staticmethod
+    def get_market_context() -> Dict[str, Any]:
+        t10, t10_date, t10_fb = MacroBridge.fetch_benchmark("DGS10")
+        sofr, sofr_date, sofr_fb = MacroBridge.fetch_benchmark("SOFR")
+        return {
+            "10Y_Treasury": t10,
+            "10Y_Treasury_As_Of": t10_date,
+            "SOFR": sofr,
+            "SOFR_As_Of": sofr_date,
+            "Fallback_Used": bool(t10_fb or sofr_fb),
+        }
+
+
+class IntelligenceHub:
+    """Grounded memo narrative generator.
+
+    No external LLM is required. If an authenticated ``ai_client`` is explicitly
+    placed in ``st.session_state``, the method may use it; otherwise the method
+    returns a deterministic local narrative built only from model outputs. This
+    avoids hallucinating while still giving the user a lender-memo draft.
+    """
+
+    @staticmethod
+    def generate_executive_summary(
+        state: Dict[str, Any],
+        metrics: Dict[str, Any],
+        risk_summary: Optional[Dict[str, Any]] = None,
+        market_context: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        s = dict(state)
+        loan = float(metrics.get("loan", metrics.get("L", 0.0)) or 0.0)
+        gate = str(metrics.get("binding_gate", metrics.get("gate", "N/A")))
+        noi = float(s.get("noi", 0.0) or 0.0)
+        rate = float(s.get("rate", 0.0) or 0.0)
+        annual_ds = calculate_mortgage_payment(loan, rate, int(s.get("amort", 25) or 25), bool(s.get("is_io", False))) * 12.0
+        dscr = safe_ratio(noi, annual_ds)
+        value = float(s.get("appraisal", 0.0) or s.get("purchase_price", 0.0) or 0.0)
+        ltv = safe_ratio(loan, value)
+        dy = safe_ratio(noi, loan)
+        market_context = market_context or {}
+        risk_summary = risk_summary or {}
+        spread = (rate - float(market_context.get("10Y_Treasury", 0.0))) if market_context else 0.0
+
+        local_summary = (
+            f"Investment thesis: The proposed senior mortgage sizes to ${loan:,.0f}, with {gate} as the binding constraint. "
+            f"At current assumptions, implied LTV is {ltv:.1%}, debt yield is {dy:.2%}, and DSCR is {dscr:.2f}x. "
+            f"These metrics indicate {'a conservative' if dscr >= 1.25 and dy >= 0.08 else 'a tighter'} credit profile under the current NOI and rate assumptions.\n\n"
+            f"Primary risks: The most important underwriting constraint is {gate}, so the credit narrative should focus on the data behind that gate. "
+            f"The risk engine reports DSCR VaR/5th percentile of {risk_summary.get('DSCR VaR 95%', risk_summary.get('VaR (Value at Risk) 95%', 'N/A'))}. "
+            f"The current coupon is approximately {spread:.2%} over the FRED 10Y Treasury fallback/live benchmark when available.\n\n"
+            f"Mitigation strategy: Validate the NOI source, confirm lease rollover exposure, and stress refinance proceeds against higher exit rates. "
+            f"If {gate} continues to bind, preserve lender cushion by lowering leverage, increasing reserves, or documenting durable income support before credit submission."
+        )
+
+        ai_client = st.session_state.get("ai_client") if hasattr(st, "session_state") else None
+        if ai_client is not None:
+            prompt = (
+                "Generate a concise three-paragraph CRE lender memo using only this data. "
+                "Do not invent facts.\n" + local_summary
+            )
+            try:
+                response = ai_client.generate_content(prompt)
+                return getattr(response, "text", local_summary) or local_summary
+            except Exception as exc:
+                logger.warning("AI narrative unavailable: %s", exc)
+        return local_summary
+
 @st.cache_data(ttl=86400)
 def geocode_address(address: str) -> Optional[dict]:
     address = str(address or "").strip()
@@ -1930,7 +2144,8 @@ def calculate_outputs(state: dict) -> dict:
     # odd UI or JSON-imported values from silently contaminating the model.
     try:
         state, schema_notes = DealStateValidator.coerce(state)
-        L, gate, gates, uses, _ = UnderwritingEngine.size_loan(state['noi'], state['appraisal'], state['purchase_price'], state['closing_costs'], state['reserves'], state['fees'], state['rate'], state['amort'], state['term'], state['is_io'], state['target_ltv'], state['target_ltc'], state['target_dscr'], state['target_dy'])
+        sizing = run_loan_sizing(state)
+        L, gate, gates, uses = sizing["loan"], sizing["binding_gate"], sizing["gates"], sizing["total_uses"]
     except UnderwritingError as exc:
         state = dict(state)
         schema_notes = [str(exc)]
@@ -2156,6 +2371,17 @@ def main():
             c2.caption(f"As of {latest.get('Overnight Target', {}).get('date', 'N/A')}")
             c3.metric("USD/CAD", f"{latest.get('USD/CAD', {}).get('val', 0):.4f}")
             c3.caption(f"As of {latest.get('USD/CAD', {}).get('date', 'N/A')}")
+
+        st.markdown("#### Macro Benchmarks / Spread Context")
+        market_context = MacroBridge.get_market_context()
+        m1, m2, m3 = st.columns(3)
+        m1.metric("10Y Treasury", f"{market_context['10Y_Treasury']:.2%}")
+        m1.caption(str(market_context.get("10Y_Treasury_As_Of", "N/A")))
+        m2.metric("SOFR", f"{market_context['SOFR']:.2%}")
+        m2.caption(str(market_context.get("SOFR_As_Of", "N/A")))
+        m3.metric("Loan Spread vs 10Y", f"{(st.session_state.get('rate', 0.0) - market_context['10Y_Treasury']):.2%}")
+        if market_context.get("Fallback_Used"):
+            st.caption("FRED fallback is active. Add FRED_API_KEY in Streamlit secrets for live US benchmark data.")
             
         if not unemp.empty and DEPS["plotly"]:
             fig = px.line(unemp, x="Date", y="Unemployment", title="Unemployment Rate" + (" (Fallback Data)" if u_deg else ""))
@@ -2304,6 +2530,11 @@ def main():
         if rr_risk_warnings:
             st.caption("Rent-roll diagnostic path used for risk metrics: " + "; ".join(rr_risk_warnings[:2]))
         st.metric("Breakeven Occupancy", f"{UnderwritingEngine.breakeven_occupancy(s.noi, max(occ_rr, 0.01), out['c_stack']['FixedCharges']):.1%}")
+        with st.expander("Executive Summary Draft", expanded=False):
+            memo_market = MacroBridge.get_market_context()
+            memo_metrics = {"loan": out["L"], "binding_gate": out["gate"]}
+            memo_risk = {"DSCR VaR 95%": "See Monte Carlo panel"}
+            st.write(IntelligenceHub.generate_executive_summary(current_state, memo_metrics, memo_risk, memo_market))
 
     # Fill Tab 2 Sensitivity
     with sens_placeholder.container():
@@ -2343,6 +2574,13 @@ def main():
             b2.metric("Success Rate", f"{mc_summary['Success Rate']:.1%}", help="Share of scenarios meeting the target DSCR input.")
             b3.metric("Risk of Default", f"{mc_summary['Risk of Default']:.1%}", help="Share of scenarios with DSCR below 1.00x.")
             b4.metric("Avg Yield on Cost", f"{mc_summary['Avg Yield on Cost']:.2%}")
+
+            risk_facade_df = RiskEngine.run_simulation(current_state, out["L"], iterations=min(int(s.mc_sims), 2000))
+            facade_metrics = RiskEngine.get_risk_metrics(risk_facade_df)
+            st.caption(
+                f"Facade risk check: Prob. DSCR < 1.0 = {facade_metrics['Prob. DSCR < 1.0']:.1%}; "
+                f"Median DSCR = {facade_metrics['Median DSCR']:.2f}x."
+            )
 
             st.caption("Backtest reference: DSCR VaR 95% is the empirical 5th percentile of simulated DSCR, not a parametric normal approximation. Survival Rate = DSCR >= 1.00x.")
             if DEPS["plotly"]:
@@ -2476,6 +2714,8 @@ def main():
                 zf.writestr("degraded_data_flags.json", json.dumps({"boc_degraded": boc_deg, "unemp_degraded": u_deg}))
                 zf.writestr("conventions.txt", json.dumps(FINANCIAL_CONVENTIONS, indent=2))
                 zf.writestr("model_governance.json", json.dumps(MODEL_GOVERNANCE_NOTES, indent=2))
+                zf.writestr("macro_context.json", json.dumps(MacroBridge.get_market_context(), default=str, indent=2))
+                zf.writestr("executive_summary.txt", IntelligenceHub.generate_executive_summary(current_state, {"loan": out["L"], "binding_gate": out["gate"]}, mc_summary_zip, MacroBridge.get_market_context()))
                 
                 if pdf_b: zf.writestr(f"{s.deal_name}.pdf", pdf_b)
                 try:
