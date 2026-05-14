@@ -645,7 +645,7 @@ if DEPS.get("pydantic"):
         pf_exit_cap: float = Field(default=0.06, ge=0.02, le=0.20)
         pf_sell_costs: float = Field(default=0.015, ge=0.0, le=0.20)
         pf_term_growth: float = Field(default=0.02, ge=-0.05, le=0.10)
-        mc_sims: int = Field(default=2000, ge=250, le=25000)
+        mc_sims: int = Field(default=2000, ge=100, le=25000)
         mc_noi_vol: float = Field(default=0.075, ge=0.0, le=0.50)
         mc_rate_vol_bps: float = Field(default=75.0, ge=0.0, le=500.0)
         mc_exit_cap_vol_bps: float = Field(default=50.0, ge=0.0, le=500.0)
@@ -710,7 +710,7 @@ class DealStateValidator:
                     notes.append(f"{key} clipped from {val} to {clipped}")
                 val = clipped
             clean[key] = val
-        clean["mc_sims"] = int(min(max(clean.get("mc_sims", 2000), 250), 25000))
+        clean["mc_sims"] = int(min(max(clean.get("mc_sims", 2000), 100), 25000))
         return clean, notes
 
 class UnderwritingEngine:
@@ -1135,7 +1135,7 @@ class RiskAnalyticsEngine:
         pf_sell_costs: float, pf_term_growth: float, sims: int, noi_vol: float,
         rate_vol_bps: float, exit_cap_vol_bps: float, seed_text: str,
     ) -> Tuple[pd.DataFrame, dict]:
-        sims = int(min(max(safe_float(sims, 2000), 250), 25000))
+        sims = int(min(max(safe_float(sims, 2000), 100), 25000))
         noi = max(0.0, safe_float(noi))
         appraisal = max(0.0, safe_float(appraisal))
         purchase_price = max(0.0, safe_float(purchase_price))
@@ -1215,6 +1215,7 @@ class RiskAnalyticsEngine:
             "Binding Gate": binding,
             "DSCR": dscr,
             "Debt Yield": dy,
+            "Yield on Cost": np.divide(noi_s, uses, out=np.zeros_like(noi_s), where=uses > EPS),
             "IRR": irr,
             "Equity Multiple": em,
             "Exit Cap": exit_cap_s,
@@ -1232,6 +1233,11 @@ class RiskAnalyticsEngine:
             "Mortgage P50": float(df["Mortgage"].quantile(0.50)),
             "Mortgage P95": float(df["Mortgage"].quantile(0.95)),
             "DSCR P5": float(df["DSCR"].quantile(0.05)),
+            "DSCR VaR 95%": float(df["DSCR"].quantile(0.05)),
+            "Survival Rate": float((df["DSCR"] >= 1.00).mean()),
+            "Success Rate": float((df["DSCR"] >= safe_float(target_dscr, 1.25)).mean()),
+            "Risk of Default": float((df["DSCR"] < 1.00).mean()),
+            "Avg Yield on Cost": float(df["Yield on Cost"].mean()),
             "IRR P5": float(df["IRR"].quantile(0.05)),
             "IRR P50": float(df["IRR"].quantile(0.50)),
             "Probability DSCR < 1.20x": float((df["DSCR"] < 1.20).mean()),
@@ -1243,6 +1249,52 @@ class RiskAnalyticsEngine:
             "Appraisal Proxy Used": bool(appraisal_proxy_used),
         }
         return df, summary
+
+
+@st.cache_data(show_spinner="Simulating market backtest...")
+def run_monte_carlo_backtest(state: Dict[str, Any], iterations: int = 100) -> pd.DataFrame:
+    """Convenience wrapper for a 100-point/quick Monte Carlo backtest.
+
+    This function delegates to the vectorized RiskAnalyticsEngine rather than
+    looping through scenarios in Python. It exists to make the GitHub code easier
+    to read: the UI can request a compact backtest while the mathematical engine
+    remains the same source of truth as the full Monte Carlo panel.
+
+    References in-code:
+    * Four-gate loan sizing uses UnderwritingEngine.size_loan.
+    * Debt service uses calculate_mortgage_payment.
+    * DSCR VaR is the empirical 5th percentile of DSCR observations.
+    """
+    s, _notes = DealStateValidator.coerce(dict(state))
+    df, _summary = RiskAnalyticsEngine.monte_carlo_deal(
+        s["noi"], s["appraisal"], s["purchase_price"], s["closing_costs"], s["reserves"], s["fees"], s["rate"],
+        s["amort"], s["term"], s["is_io"], s["target_ltv"], s["target_ltc"], s["target_dscr"], s["target_dy"],
+        s["pf_rev_growth"], s["pf_exp_growth"], s["pf_exp_ratio"], s["pf_exit_cap"], s["pf_sell_costs"],
+        s["pf_term_growth"], int(iterations), s["mc_noi_vol"], s["mc_rate_vol_bps"], s["mc_exit_cap_vol_bps"],
+        str(s.get("deal_id", "quick_backtest")),
+    )
+    if not df.empty:
+        df = df.rename(columns={"Mortgage": "loan_amount", "Debt Yield": "debt_yield", "Yield on Cost": "yield_on_cost", "Exit Cap": "exit_cap", "Rate": "rate", "NOI": "noi", "DSCR": "dscr"})
+        df.insert(0, "iteration", np.arange(1, len(df) + 1))
+        df["is_viable"] = df["dscr"] >= float(s.get("target_dscr", 1.25))
+    return df
+
+
+def get_simulation_summary(df: pd.DataFrame) -> Dict[str, Any]:
+    """Summarize Monte Carlo results into lender-facing risk metrics."""
+    if df is None or df.empty:
+        return {"Success Rate": "0.0%", "Mean DSCR": 0.0, "VaR (Value at Risk) 95%": 0.0, "Risk of Default": "0.0%", "Avg Yield on Cost": 0.0}
+    dscr_col = "dscr" if "dscr" in df.columns else "DSCR"
+    yoc_col = "yield_on_cost" if "yield_on_cost" in df.columns else "Yield on Cost"
+    valid = df[dscr_col].replace([np.inf, -np.inf], np.nan).dropna()
+    success_rate = float((df.get("is_viable", df[dscr_col] >= 1.20)).mean()) if len(df) else 0.0
+    return {
+        "Mean DSCR": float(valid.mean()) if not valid.empty else 0.0,
+        "VaR (Value at Risk) 95%": float(valid.quantile(0.05)) if not valid.empty else 0.0,
+        "Success Rate": f"{success_rate * 100:.1f}%",
+        "Avg Yield on Cost": float(df[yoc_col].mean()) if yoc_col in df.columns else 0.0,
+        "Risk of Default": f"{float((df[dscr_col] < 1.0).mean()) * 100:.1f}%" if dscr_col in df.columns else "0.0%",
+    }
 
 class ValidationEngine:
     @staticmethod
@@ -2005,7 +2057,7 @@ def main():
         st.subheader("Sensitivity & Quant Risk")
         st.caption("Human note: the heatmap shows deterministic gate movement; the Monte Carlo block below shows probabilistic downside bands.")
         q1, q2, q3, q4 = st.columns(4)
-        s.mc_sims = q1.number_input("Monte Carlo Runs", min_value=250, max_value=10000, value=int(s.mc_sims), step=250)
+        s.mc_sims = q1.number_input("Monte Carlo Runs", min_value=100, max_value=10000, value=int(s.mc_sims), step=100)
         s.mc_noi_vol = q2.slider("NOI Volatility (%)", 0.0, 50.0, float(s.mc_noi_vol * 100), 0.5) / 100.0
         s.mc_rate_vol_bps = q3.slider("Rate Shock Vol (bps)", 0, 500, int(s.mc_rate_vol_bps), 5)
         s.mc_exit_cap_vol_bps = q4.slider("Exit Cap Vol (bps)", 0, 500, int(s.mc_exit_cap_vol_bps), 5)
@@ -2283,12 +2335,23 @@ def main():
             r1, r2, r3, r4 = st.columns(4)
             r1.metric("Mortgage P50", f"${mc_summary['Mortgage P50']:,.0f}")
             r2.metric("Mortgage P5", f"${mc_summary['Mortgage P5']:,.0f}")
-            r3.metric("DSCR P5", f"{mc_summary['DSCR P5']:.2f}x")
+            r3.metric("DSCR P5 / VaR 95%", f"{mc_summary['DSCR VaR 95%']:.2f}x")
             r4.metric("Prob. DSCR < 1.20x", f"{mc_summary['Probability DSCR < 1.20x']:.1%}")
+
+            b1, b2, b3, b4 = st.columns(4)
+            b1.metric("Survival Rate", f"{mc_summary['Survival Rate']:.1%}", help="Share of simulated scenarios with DSCR >= 1.00x.")
+            b2.metric("Success Rate", f"{mc_summary['Success Rate']:.1%}", help="Share of scenarios meeting the target DSCR input.")
+            b3.metric("Risk of Default", f"{mc_summary['Risk of Default']:.1%}", help="Share of scenarios with DSCR below 1.00x.")
+            b4.metric("Avg Yield on Cost", f"{mc_summary['Avg Yield on Cost']:.2%}")
+
+            st.caption("Backtest reference: DSCR VaR 95% is the empirical 5th percentile of simulated DSCR, not a parametric normal approximation. Survival Rate = DSCR >= 1.00x.")
             if DEPS["plotly"]:
                 fig_mc = px.histogram(mc_df, x="Mortgage", nbins=40, title="Mortgage Amount Distribution")
                 fig_mc.update_layout(template="plotly_dark", paper_bgcolor="#0B0F19", plot_bgcolor="#0F172A")
                 st.plotly_chart(fig_mc, use_container_width=True)
+                fig_dscr = px.histogram(mc_df, x="DSCR", nbins=40, title="DSCR Distribution / Survival Backtest")
+                fig_dscr.update_layout(template="plotly_dark", paper_bgcolor="#0B0F19", plot_bgcolor="#0F172A")
+                st.plotly_chart(fig_dscr, use_container_width=True)
             st.caption("IRR P5/P50 are conditional on valid IRRs. Undefined/extreme-loss IRRs below -95% are excluded and disclosed through IRR Valid Rate.")
             if mc_summary.get("Appraisal Proxy Used"):
                 st.warning("Monte Carlo used purchase price as the LTV value because appraisal is blank.")
