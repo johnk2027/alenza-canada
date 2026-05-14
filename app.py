@@ -266,29 +266,83 @@ class UnderwritingEngine:
     @staticmethod
     @st.cache_data(show_spinner=False)
     def size_loan(noi: float, appraisal: float, purchase_price: float, closing_costs: float, reserves: float, fees_pct: float, rate: float, amort: int, term: int, is_io: bool, target_ltv: float, target_ltc: float, target_dscr: float, target_dy: float) -> Tuple[float, str, dict, float, float]:
-        noi, appraisal = max(0.0, noi), max(0.0, appraisal)
-        hard_costs = purchase_price + closing_costs + reserves
-        loan, total_uses = 0.0, hard_costs
-        gates = {"LTV": 0.0, "LTC": 0.0, "DSCR": 0.0, "Debt Yield": 0.0}
+        """
+        Size the senior mortgage amount using only valid underwriting gates.
 
-        for _ in range(15):
+        Fix:
+        - The prior implementation initialized every gate to 0.0.
+          That made the mortgage amount display as $0 whenever appraisal,
+          purchase price/uses, or NOI had not been entered.
+        - This version excludes unavailable gates, reports missing inputs,
+          and uses purchase price as a collateral fallback when appraisal is blank.
+        """
+        noi = max(0.0, safe_float(noi))
+        appraisal = max(0.0, safe_float(appraisal))
+        purchase_price = max(0.0, safe_float(purchase_price))
+        closing_costs = max(0.0, safe_float(closing_costs))
+        reserves = max(0.0, safe_float(reserves))
+        fees_pct = max(0.0, safe_float(fees_pct))
+        rate = max(0.0, safe_float(rate))
+        amort = max(1, int(safe_float(amort, 1)))
+        target_ltv = max(0.0, safe_float(target_ltv))
+        target_ltc = max(0.0, safe_float(target_ltc))
+        target_dscr = max(0.0, safe_float(target_dscr))
+        target_dy = max(0.0, safe_float(target_dy))
+
+        hard_costs = purchase_price + closing_costs + reserves
+        collateral_value = appraisal if appraisal > 0 else purchase_price
+
+        loan = 0.0
+        total_uses = hard_costs
+        gates: Dict[str, float] = {}
+        missing: List[str] = []
+
+        for _ in range(25):
             total_uses = hard_costs + (loan * fees_pct)
-            gates["LTV"] = appraisal * target_ltv
-            gates["LTC"] = total_uses * target_ltc
-            gates["Debt Yield"] = noi / target_dy if target_dy > 0 else 0.0
-            
-            m_rate = rate / 12
-            if m_rate > 0 and noi > 0:
-                if is_io: gates["DSCR"] = (noi / target_dscr) / rate
+            gates = {}
+            missing = []
+
+            if collateral_value > 0 and target_ltv > 0:
+                gates["LTV"] = collateral_value * target_ltv
+            else:
+                missing.append("LTV requires appraisal or purchase price")
+
+            if total_uses > 0 and target_ltc > 0:
+                gates["LTC"] = total_uses * target_ltc
+            else:
+                missing.append("LTC requires purchase price/uses")
+
+            if noi > 0 and target_dy > 0:
+                gates["Debt Yield"] = noi / target_dy
+            else:
+                missing.append("Debt Yield requires NOI and target debt yield")
+
+            if noi > 0 and rate > 0 and target_dscr > 0:
+                if is_io:
+                    gates["DSCR"] = (noi / target_dscr) / rate
                 else:
-                    pmt_f = (1 - (1 + m_rate) ** -(amort * 12)) / m_rate
+                    m_rate = rate / 12
+                    pmt_f = (1 - (1 + m_rate) ** -(amort * 12)) / m_rate if m_rate > 0 else amort * 12
                     gates["DSCR"] = (noi / target_dscr) / 12 * pmt_f if pmt_f > 0 else 0.0
-            
+            else:
+                missing.append("DSCR requires NOI, rate, and target DSCR")
+
+            if not gates:
+                diagnostics = {"Missing Inputs": 0.0, "_messages": sorted(set(missing))}
+                return 0.0, "Missing Inputs", diagnostics, round(total_uses, 2), round(total_uses, 2)
+
             new_loan = max(0.0, min(gates.values()))
-            if abs(new_loan - loan) < 0.01: break
+            if abs(new_loan - loan) < 0.01:
+                loan = new_loan
+                break
             loan = new_loan
 
-        return round(loan, 2), min(gates, key=gates.get) if gates else "N/A", gates, round(total_uses, 2), round(total_uses - loan, 2)
+        if missing:
+            gates["_messages"] = sorted(set(missing))
+
+        numeric_gates = {k: v for k, v in gates.items() if not str(k).startswith("_")}
+        binding_gate = min(numeric_gates, key=numeric_gates.get) if numeric_gates else "Missing Inputs"
+        return round(loan, 2), binding_gate, gates, round(total_uses, 2), round(total_uses - loan, 2)
 
     @staticmethod
     @st.cache_data(show_spinner=False)
@@ -658,24 +712,64 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Version load failed: {e}")
             return None
-
 # =============================================================================
 # 9. MARKET INTELLIGENCE & APIs (Degraded Mode Aware)
 # =============================================================================
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=3600)
 def fetch_boc_history(days=365) -> Tuple[dict, pd.DataFrame, bool]:
-    # Fixed Series Identifiers to canonical Valet codes to prevent API errors
-    sm = {"FXUSDCAD": "USD/CAD", "V122539": "2Y Yield", "V122540": "5Y Yield", "V122543": "10Y Yield", "V39079": "Overnight Target"}
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0", "Accept": "application/json"}
+    """
+    Fetch Bank of Canada Valet observations.
+
+    Fixes:
+    - Uses STATIC_ATABLE_V39079 for the overnight target instead of V39079.
+    - Keeps the latest date for each series separately.
+    - Logs HTTP response details when the API returns a non-200 status.
+    """
+    sm = {
+        "FXUSDCAD": "USD/CAD",
+        "V122539": "2Y Yield",
+        "V122540": "5Y Yield",
+        "V122543": "10Y Yield",
+        "STATIC_ATABLE_V39079": "Overnight Target",
+    }
+    url = f"https://www.bankofcanada.ca/valet/observations/{','.join(sm.keys())}/json?recent={int(days)}"
+    headers = {"User-Agent": f"AlenzaCapitalOS/{VERSION}", "Accept": "application/json"}
+
     try:
-        r = requests.get(f"https://www.bankofcanada.ca/valet/observations/{','.join(sm.keys())}/json?recent={days}", headers=headers, timeout=10)
-        r.raise_for_status()
-        df = pd.DataFrame([{"Date": pd.to_datetime(o.get("d"), errors="coerce")} | {l: safe_float(o.get(k, {}).get("v")) for k, l in sm.items()} for o in r.json().get("observations", [])])
-        df = df.dropna(subset=["Date"])
-        if df.empty: return {}, pd.DataFrame(), True
-        return {c: {"val": df[c].dropna().iloc[-1], "date": df["Date"].iloc[-1]} for c in df.columns if c!="Date" and not df[c].dropna().empty}, df, False
-    except Exception as e: 
-        logger.warning(f"BoC fetch failed: {e}")
+        r = requests.get(url, headers=headers, timeout=20)
+        if r.status_code != 200:
+            logger.warning("BoC fetch failed. HTTP %s. URL=%s. Body=%s", r.status_code, r.url, r.text[:1000])
+            return {}, pd.DataFrame(), True
+
+        payload = r.json()
+        rows = []
+        for obs in payload.get("observations", []):
+            row = {"Date": pd.to_datetime(obs.get("d"), errors="coerce")}
+            for code, label in sm.items():
+                row[label] = safe_float(obs.get(code, {}).get("v"), np.nan)
+            rows.append(row)
+
+        df = pd.DataFrame(rows).dropna(subset=["Date"])
+        if df.empty:
+            logger.warning("BoC returned no usable observations. Payload keys=%s", list(payload.keys()))
+            return {}, pd.DataFrame(), True
+
+        latest = {}
+        for label in sm.values():
+            valid = df[["Date", label]].dropna()
+            if not valid.empty:
+                latest[label] = {"val": float(valid[label].iloc[-1]), "date": valid["Date"].iloc[-1]}
+
+        return latest, df, False
+
+    except requests.exceptions.RequestException as e:
+        logger.warning("BoC network/request failed: %s", e)
+        return {}, pd.DataFrame(), True
+    except ValueError as e:
+        logger.warning("BoC JSON parse failed: %s", e)
+        return {}, pd.DataFrame(), True
+    except Exception:
+        logger.exception("Unexpected BoC fetch failure")
         return {}, pd.DataFrame(), True
 
 @st.cache_data(ttl=86400)
@@ -754,7 +848,7 @@ def generate_pdf_memo(s: dict, loan: float, gate: str, ltv: float, dscr: float, 
         story.append(Paragraph(f"<b>State Hash:</b> {h_pre[:16]}...", s_norm))
         story.append(Spacer(1, 12))
         
-        t1 = Table([["Metric", "Value", "Target"], ["Max Proceeds", f"${loan:,.0f}", gate], ["LTV", f"{ltv:.1%}", f"{s.get('target_ltv',0):.1%}"], ["DSCR", f"{dscr:.2f}x", f"{s.get('target_dscr',0):.2f}x"], ["Req. Equity", f"${req_eq:,.0f}", "N/A"], ["IRR", f"{irr:.2%}", "N/A"]], colWidths=[150, 150, 200])
+        t1 = Table([["Metric", "Value", "Target"], ["Mortgage Amount", f"${loan:,.0f}", gate], ["LTV", f"{ltv:.1%}", f"{s.get('target_ltv',0):.1%}"], ["DSCR", f"{dscr:.2f}x", f"{s.get('target_dscr',0):.2f}x"], ["Req. Equity", f"${req_eq:,.0f}", "N/A"], ["IRR", f"{irr:.2%}", "N/A"]], colWidths=[150, 150, 200])
         t1.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0F172A")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#CFB87C")), ("GRID", (0, 0), (-1, -1), 0.5, colors.grey)]))
         story.append(t1)
         story.append(Spacer(1, 16))
@@ -964,8 +1058,11 @@ def main():
 
             c1, c2, c3 = st.columns(3)
             c1.metric("5Y GoC Yield", f"{latest.get('5Y Yield', {}).get('val', 0):.2f}%")
+            c1.caption(f"As of {latest.get('5Y Yield', {}).get('date', 'N/A')}")
             c2.metric("Overnight Target", f"{latest.get('Overnight Target', {}).get('val', 0):.2f}%")
+            c2.caption(f"As of {latest.get('Overnight Target', {}).get('date', 'N/A')}")
             c3.metric("USD/CAD", f"{latest.get('USD/CAD', {}).get('val', 0):.4f}")
+            c3.caption(f"As of {latest.get('USD/CAD', {}).get('date', 'N/A')}")
             
         if not unemp.empty and DEPS["plotly"]:
             fig = px.line(unemp, x="Date", y="Unemployment", title="Unemployment Rate" + (" (Fallback Data)" if u_deg else ""))
@@ -1064,8 +1161,14 @@ def main():
     # Fill Top Header
     with header_placeholder.container():
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Max Proceeds", f"${out['L']:,.0f}")
-        c1.caption(f"⚠️ Binding Constraint: **{out['gate']}**")
+        c1.metric("Mortgage Amount", f"${out['L']:,.0f}")
+        c1.caption(f"Binding Constraint: **{out['gate']}**")
+        if out["L"] <= 0:
+            missing_msgs = out.get("gates", {}).get("_messages", [])
+            if missing_msgs:
+                st.warning("Mortgage amount is $0 because required sizing inputs are missing: " + "; ".join(missing_msgs))
+            else:
+                st.warning("Mortgage amount is $0 because one or more underwriting constraints sized to zero.")
         c2.metric("Projected IRR", f"{out['rets']['IRR']:.2%}")
         c3.metric("Equity Multiple", f"{out['rets']['EM']:.2f}x")
         c4.metric("Req. Sponsor Equity", f"${abs(out['req_equity']):,.0f}", delta="CASH OUT" if out['req_equity']<0 else None, delta_color="inverse" if out['req_equity']<0 else "normal")
@@ -1139,7 +1242,13 @@ def main():
             with pd.ExcelWriter(xl_out, engine="xlsxwriter") as w:
                 pd.DataFrame([current_state]).to_excel(w, sheet_name="Inputs", index=False)
                 pd.DataFrame([out['c_stack']]).to_excel(w, sheet_name="Capital Stack", index=False)
-                pd.DataFrame([out['gates']]).to_excel(w, sheet_name="Constraints", index=False)
+                constraints_export = pd.DataFrame([{
+                    k: v for k, v in out['gates'].items() if not str(k).startswith("_")
+                }])
+                constraints_export.to_excel(w, sheet_name="Constraints", index=False)
+                gate_messages = out.get("gates", {}).get("_messages", [])
+                if gate_messages:
+                    pd.DataFrame({"Diagnostic": gate_messages}).to_excel(w, sheet_name="Sizing Diagnostics", index=False)
                 rr_df.to_excel(w, sheet_name="Rent Roll", index=False)
                 out['pf_df'].to_excel(w, sheet_name="Pro Forma", index=False)
                 out['amort_df'].to_excel(w, sheet_name="Amortization", index=False)
